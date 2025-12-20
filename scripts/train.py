@@ -90,6 +90,7 @@ class TrainConfig:
     action_model_type: str = 'DiT-B'                                # Action model type, chose from ['DiT-S', 'DiT-B', 'DiT-L']
     use_ema: bool = False                                           # EMA version of action model
     action_dim: int = 7                                             # Dimension of action space
+    num_threads: Optional[int] = None                               # Number of threads for PyTorch CPU operations (None = auto)
 
     def __post_init__(self) -> None:
         """Lift optimization parameters from `self.vla` for ease of use =>> validate on `expected_world_size`"""
@@ -117,6 +118,14 @@ class TrainConfig:
 @draccus.wrap()
 def train(cfg: TrainConfig) -> None:
     overwatch.info("CogACT-VLA Training :: Warming Up")
+
+    # Set number of threads for PyTorch CPU operations
+    if cfg.num_threads is not None:
+        torch.set_num_threads(cfg.num_threads)
+        overwatch.info(f"Set PyTorch CPU threads to {cfg.num_threads}")
+    else:
+        # Use default (usually all available cores)
+        overwatch.info(f"Using default PyTorch CPU threads: {torch.get_num_threads()}")
 
     # Note => Under `torchrun` initializing `overwatch` will automatically set up `torch.distributed`
     torch.cuda.set_device(device_id := overwatch.local_rank())
@@ -189,6 +198,13 @@ def train(cfg: TrainConfig) -> None:
     # [Validate] Model should be in Full Precision!
     for param in vla.parameters():
         assert param.dtype == torch.float32, f"Loaded VLM parameter not in full precision: {param}"
+    
+    # Note: For bfloat16 to reduce memory, use FSDP's mixed precision training instead of manual conversion
+    # FSDP will handle precision conversion automatically via `enable_mixed_precision_training` parameter
+    # Manual conversion before FSDP wrapping causes parameter shape mismatch errors
+    # 注意：要使用 bfloat16 减少内存，应该使用 FSDP 的混合精度训练（enable_mixed_precision_training）
+    # 而不是手动转换。在 FSDP 包装前手动转换会导致参数形状不匹配错误
+    
 
     # Determine training "stage" based on frozen vs unfrozen parameters --> supports different fine-tuning schemes!
     if not cfg.vla.freeze_vision_backbone and not cfg.vla.freeze_llm_backbone:

@@ -319,8 +319,14 @@ class TrainingStrategy(ABC):
                 # Commit Loss =>> Backward!
                 metrics.commit(loss=loss)
                 
+                # Clear cache before backward to free up memory
+                torch.cuda.empty_cache()
+                
                 normalized_loss = loss / self.grad_accumulation_steps
                 normalized_loss.backward()
+                
+                # Clear cache after backward to free up memory for gradient sync
+                torch.cuda.empty_cache()
 
                 # === Gradient Step ===
                 # Step =>> Only if Done w/ Gradient Accumulation

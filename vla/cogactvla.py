@@ -243,11 +243,59 @@ class CogACT(nn.Module):
 
         # Load ActionModel from Checkpoint
         if "action_model" in model_state_dict:
-            cogact.action_model.load_state_dict(model_state_dict["action_model"])
+            try:
+                # Handle positional_embedding shape mismatch
+                checkpoint_state_dict = model_state_dict["action_model"].copy()
+                if "net.positional_embedding" in checkpoint_state_dict:
+                    checkpoint_pos_emb = checkpoint_state_dict["net.positional_embedding"]
+                    current_pos_emb_shape = cogact.action_model.net.positional_embedding.shape
+                    if checkpoint_pos_emb.shape != current_pos_emb_shape:
+                        overwatch.warning(
+                            f"Positional embedding shape mismatch: checkpoint {checkpoint_pos_emb.shape} vs "
+                            f"current {current_pos_emb_shape}. Loading matching portion or initializing new."
+                        )
+                        # Try to load matching portion if checkpoint is larger
+                        if checkpoint_pos_emb.shape[0] > current_pos_emb_shape[0]:
+                            # Checkpoint has more positions, take the first matching ones
+                            checkpoint_state_dict["net.positional_embedding"] = checkpoint_pos_emb[:current_pos_emb_shape[0], :]
+                        else:
+                            # Current model needs more positions, skip loading this parameter
+                            del checkpoint_state_dict["net.positional_embedding"]
+                            overwatch.info("Skipping positional_embedding due to size mismatch, using random initialization")
+                
+                cogact.action_model.load_state_dict(checkpoint_state_dict, strict=False)
+                overwatch.info("ActionModel loaded successfully (some parameters may be skipped due to shape mismatch)")
+            except RuntimeError as e:
+                overwatch.warning(f"Error loading ActionModel state_dict: {e}. Initializing a new one.")
+            
             if "ema_diffusion" in model_state_dict and use_ema:
-                cogact.ema_diffusion.load_state_dict(model_state_dict["ema_diffusion"])
+                try:
+                    ema_checkpoint_state_dict = model_state_dict["ema_diffusion"].copy()
+                    if "net.positional_embedding" in ema_checkpoint_state_dict:
+                        checkpoint_pos_emb = ema_checkpoint_state_dict["net.positional_embedding"]
+                        current_pos_emb_shape = cogact.ema_diffusion.net.positional_embedding.shape
+                        if checkpoint_pos_emb.shape != current_pos_emb_shape:
+                            if checkpoint_pos_emb.shape[0] > current_pos_emb_shape[0]:
+                                ema_checkpoint_state_dict["net.positional_embedding"] = checkpoint_pos_emb[:current_pos_emb_shape[0], :]
+                            else:
+                                del ema_checkpoint_state_dict["net.positional_embedding"]
+                    cogact.ema_diffusion.load_state_dict(ema_checkpoint_state_dict, strict=False)
+                except RuntimeError as e:
+                    overwatch.warning(f"Error loading EMA Diffusion state_dict: {e}. Skipping EMA.")
             elif use_ema:
-                cogact.ema_diffusion.load_state_dict(model_state_dict["action_model"])
+                try:
+                    ema_checkpoint_state_dict = model_state_dict["action_model"].copy()
+                    if "net.positional_embedding" in ema_checkpoint_state_dict:
+                        checkpoint_pos_emb = ema_checkpoint_state_dict["net.positional_embedding"]
+                        current_pos_emb_shape = cogact.ema_diffusion.net.positional_embedding.shape
+                        if checkpoint_pos_emb.shape != current_pos_emb_shape:
+                            if checkpoint_pos_emb.shape[0] > current_pos_emb_shape[0]:
+                                ema_checkpoint_state_dict["net.positional_embedding"] = checkpoint_pos_emb[:current_pos_emb_shape[0], :]
+                            else:
+                                del ema_checkpoint_state_dict["net.positional_embedding"]
+                    cogact.ema_diffusion.load_state_dict(ema_checkpoint_state_dict, strict=False)
+                except RuntimeError as e:
+                    overwatch.warning(f"Error loading EMA Diffusion from ActionModel: {e}. Skipping EMA.")
         else:
             overwatch.warning("No ActionModel found in the pretrained checkpoint. Initializing a new one.")
         return cogact        

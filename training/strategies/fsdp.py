@@ -25,6 +25,7 @@ from torch.distributed.fsdp import (
     MixedPrecision,
     ShardingStrategy,
     StateDictType,
+    CPUOffload,
 )
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.optim import AdamW
@@ -184,6 +185,11 @@ class FSDPStrategy(TrainingStrategy):
             fsdp_precision_policy = MixedPrecision(
                 param_dtype=torch.bfloat16, reduce_dtype=reduce_buffer_dtype, buffer_dtype=reduce_buffer_dtype
             )
+            overwatch.info(
+                f"[Mixed Precision Enabled] Parameter dtype: {fsdp_precision_policy.param_dtype}, "
+                f"Reduce dtype: {fsdp_precision_policy.reduce_dtype}, "
+                f"Buffer dtype: {fsdp_precision_policy.buffer_dtype}"
+            )
 
             # When running FSDP with a frozen vision backbone --> move to half precision!
             if self.stage not in {"full-finetune", "vla-full-train", "vla-sandwich-train"}:
@@ -195,6 +201,12 @@ class FSDPStrategy(TrainingStrategy):
             fsdp_precision_policy = MixedPrecision(
                 param_dtype=torch.float32, reduce_dtype=torch.float32, buffer_dtype=torch.float32
             )
+            overwatch.info(
+                f"[Mixed Precision Disabled] All dtypes set to FP32: "
+                f"Parameter={fsdp_precision_policy.param_dtype}, "
+                f"Reduce={fsdp_precision_policy.reduce_dtype}, "
+                f"Buffer={fsdp_precision_policy.buffer_dtype}"
+            )
 
         # <FSDP> => note that FSDP will automatically take care of device placement (similar to `autocast`)
         self.vlm = FSDP(
@@ -205,6 +217,7 @@ class FSDPStrategy(TrainingStrategy):
             device_id=torch.cuda.current_device(),
             limit_all_gathers=True,
             use_orig_params=True,
+            cpu_offload=CPUOffload(offload_params=True),
         )
         # Gradient Checkpoint Setup
         if self.enable_gradient_checkpointing:

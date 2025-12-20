@@ -147,3 +147,17 @@ dmypy.json
 # Caches and Datasets
 cache/
 data/
+
+# Training runs and checkpoints
+runs/
+*.pt
+*.optimizer
+*.pth
+*.ckpt
+checkpoints/
+
+# Logs and output files
+nohup.out
+*.log
+train.txt
+*.md
