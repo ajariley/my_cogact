@@ -165,8 +165,11 @@ def train(cfg: TrainConfig) -> None:
         # [Validate] Pretrained Checkpoint `step` and `epoch` should match `resume_step` and `resume_epoch`
         #   =>> Note :: We make developers pass in `resume_*` arguments as an extra sanity check!
         if cfg.is_resume:
-            assert int(re.search("step-(.+?)-", cfg.pretrained_checkpoint.name).group(1)) == cfg.resume_step
-            assert int(re.search("epoch-(.+?)-", cfg.pretrained_checkpoint.name).group(1)) == cfg.resume_epoch
+            # get the checkpoint name，否则原本是string ，无法get name
+            checkpoint_name = Path(cfg.pretrained_checkpoint).name
+            assert int(re.search("step-(.+?)-", checkpoint_name).group(1)) == cfg.resume_step
+            assert int(re.search("epoch-(.+?)-", checkpoint_name).group(1)) == cfg.resume_epoch
+           
         overwatch.info("Loading VLA Checkpoint")
         if cfg.use_ema:
             overwatch.info("Loading EMA of Diffusion")

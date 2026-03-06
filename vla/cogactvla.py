@@ -324,13 +324,16 @@ class CogACT(nn.Module):
         @return Unnormalized (continuous) action vector --> end-effector deltas.
         """
         image_transform, tokenizer = self.vlm.vision_backbone.image_transform, self.vlm.llm_backbone.tokenizer
-
-        # Build VLA Prompt
+        ########################################################
+        # A 构造VLM输入（图像+文本）
+        ########################################################
+        # 1. Build VLA Prompt
         prompt_builder = self.vlm.get_prompt_builder()
         prompt_builder.add_turn(role="human", message=f"What action should the robot take to {instruction.lower()}?")
         prompt_text = prompt_builder.get_prompt()
-        # Prepare Inputs
+        # 2. tokenize得到Prepare Inputs
         input_ids = tokenizer(prompt_text, truncation=True, return_tensors="pt").input_ids.to(self.vlm.device)
+        # 补齐特殊token
         if isinstance(tokenizer, LlamaTokenizerFast):
             # Note: We need to add this special empty token ('') after the colon (':') token in "ASSISTANT:"
             #       insert it to match the inputs seen at training time. The empty token is at index 29871.
@@ -341,7 +344,7 @@ class CogACT(nn.Module):
         else:
             raise ValueError(f"Unsupported `tokenizer` type = {type(tokenizer)}")
 
-        # Preprocess Image
+        # 4. 将图像处理成pixel_values
         pixel_values = image_transform(image)
         if isinstance(pixel_values, torch.Tensor):
             pixel_values = pixel_values[None, ...].to(self.vlm.device)
@@ -353,7 +356,10 @@ class CogACT(nn.Module):
         # Invoke super().generate --> taps into `GenerationMixin` which (redirects) to `forward()`
         autocast_dtype = self.vlm.llm_backbone.half_precision_dtype
 
-        # Generate cognition feature through vlm
+        ########################################################
+        # B 用VLM生成 cognition feature
+        ########################################################
+        # 5.Generate cognition feature through vlm从而提取出hidden layer
         with torch.autocast("cuda", dtype=autocast_dtype, enabled=self.vlm.enable_mixed_precision_training):
             # fmt: off
             output = super(PrismaticVLM, self.vlm).generate(
@@ -366,26 +372,30 @@ class CogACT(nn.Module):
             )
             # fmt: on
 
-        # Extract cognition feature
+        # 6. Extract cognition feature
         cognition_features = output.hidden_states[0][-1][:,-1,:]
+
         assert (cognition_features.shape[0], cognition_features.shape[1]) == (1,4096), "Batch size must be 1 for action prediction"
         using_cfg = cfg_scale > 1.0
 
         model_dtype = next(self.action_model.net.parameters()).dtype
         B = cognition_features.shape[0]
-
+        # 7. 将cognition_features变成[B, 1, D]
         cognition_features = cognition_features.unsqueeze(1).to(model_dtype)  # [B, 1, D]
 
-        # Sample random noise
+        ########################################################
+        # C 扩散动作头
+        ########################################################
+        # 8.Sample random noise 初始化噪声动作序列
         noise = torch.randn(B, self.future_action_window_size+1, self.action_model.in_channels, device=cognition_features.device).to(model_dtype)  #[B, T, D]
     
-        # Setup classifier-free guidance:
+        # 9. Setup classifier-free guidance:
         if using_cfg:
             noise = torch.cat([noise, noise], 0)
             uncondition = self.action_model.net.z_embedder.uncondition
             uncondition = uncondition.unsqueeze(0)  #[1, D]
             uncondition = uncondition.expand(B, 1, -1) #[B, 1, D]
-            z = torch.cat([cognition_features, uncondition], 0)
+            z = torch.cat([cognition_features, uncondition], 0) #uncondition就是占位
             cfg_scale = cfg_scale
             model_kwargs = dict(z=z, cfg_scale=cfg_scale)
             sample_fn = self.action_model.net.forward_with_cfg
@@ -393,7 +403,8 @@ class CogACT(nn.Module):
             model_kwargs = dict(z=cognition_features)
             sample_fn = self.action_model.net.forward
 
-        # DDIM Sampling
+        # 10.DDIM Sampling或者DDPM Sampling
+        # 10.1 DDIM Sampling
         if use_ddim and num_ddim_steps is not None:
             if self.action_model.ddim_diffusion is None:
                 self.action_model.create_ddim(ddim_step=num_ddim_steps)
@@ -407,7 +418,7 @@ class CogACT(nn.Module):
                                                                 eta=0.0
                                                                 )
         else:
-            # DDPM Sampling
+            # 10.2 DDPM Sampling
             samples = self.action_model.diffusion.p_sample_loop(sample_fn, 
                                                                     noise.shape, 
                                                                     noise, 
@@ -416,16 +427,21 @@ class CogACT(nn.Module):
                                                                     progress=False,
                                                                     device=cognition_features.device
                                                                     )
+        # 11. 如果使用CFG，则去掉null class samples
         if using_cfg:
             samples, _ = samples.chunk(2, dim=0)  # Remove null class samples
+        # 12. 将samples变成numpy数组，得到normalized_actions
         normalized_actions = samples[0].cpu().numpy()
-
-        # Un-normalize Actions        
+        ########################################################
+        # D 后处理
+        ########################################################
+        # 13. Un-normalize Actions        
         action_norm_stats = self.get_action_stats(unnorm_key)
         mask = action_norm_stats.get("mask", np.ones_like(action_norm_stats["q01"], dtype=bool))
         action_high, action_low = np.array(action_norm_stats["q99"]), np.array(action_norm_stats["q01"])
         normalized_actions = np.clip(normalized_actions, -1, 1)
         normalized_actions[:, 6] = np.where(normalized_actions[:, 6] < 0.5, 0, 1) 
+        # 14. 将normalized_actions变成actions
         actions = np.where(
             mask,
             0.5 * (normalized_actions + 1) * (action_high - action_low) + action_low,
@@ -541,6 +557,7 @@ class CogACT(nn.Module):
         cumulative_sum = attention_mask.cumsum(dim=1)  
         last_true_indices = (cumulative_sum == cumulative_sum.max(dim=1, keepdim=True)[0]).float().argmax(dim=1)  
         expanded_indices = last_true_indices.unsqueeze(-1).expand(-1, last_hidden.size(-1))  
+        # 7. 
         cognition_features = last_hidden.gather(1, expanded_indices.unsqueeze(1)).squeeze(1) #[B, D]
 
         assert (cognition_features.shape[0], cognition_features.shape[1]) == (B, 4096), "Batch size must be B for action prediction"
