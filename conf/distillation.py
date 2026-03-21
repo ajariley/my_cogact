@@ -31,6 +31,12 @@ class DistillationConfig:
     past_action_window_size: int = 0
     action_dim: int = 7
     cfg_scale_teacher: float = 1.5  # 仅教师推理时用 CFG，学生不用
+    # FSDP 相关参数
+    use_fsdp: bool = True
+    use_cpu_offload: bool = True
+    use_bf16: bool = True
+    reduce_in_full_precision: bool = True
+    train_strategy: str = "fsdp"
     # Loss 权重
     lambda_task: float = 0.3
     lambda_final: float = 1.0

@@ -1,4 +1,4 @@
-
+import os
 from pathlib import Path
 from dataclasses import dataclass
 from typing import Dict, Optional, Any
@@ -7,33 +7,63 @@ import torch
 from torch.utils.data import DataLoader
 import draccus
 
+# 分布式
+import torch.distributed as dist
+
+from prismatic.overwatch import initialize_overwatch
+
 from vla import load_vla, CogACT
 from action_model.action_model import ActionModel
 from prismatic.vla import get_vla_dataset_and_collator
 
 from conf.distillation import DistillationConfig
 from distillation.loaders import load_teacher, load_student, load_dataloader
-from distillation.runners import run_teacher_with_recording, run_student_ddim
+from distillation.runners import run_teacher_with_recording, run_student_ddim, get_cognition_features
 from distillation.loss import compute_loss
 
+overwatch = initialize_overwatch(__name__)
+
 """是主训练函数，用于训练学生模型。入口函数调用这个函数"""
+
 
 def train_distillation(cfg: DistillationConfig, hf_token: Optional[str] = None) -> None:
     """
     主训练入口。
-    流程：load_teacher → load_student → load_dataloader → for batch in dataloader { ... }
+    流程：load_teacher → [FSDP wrap 或 to(device)] → load_student → load_dataloader → for batch in dataloader { ... }
     """
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-    # A. 加载
+    # A. 加载教师
     teacher = load_teacher(
         cfg.teacher_checkpoint,
         cfg.action_model_type_teacher,
         cfg.future_action_window_size,
         hf_token=hf_token,
     )
-    teacher = teacher.to(device)
 
+    # B. FSDP 包装或移至 device（在 load_student 之前）
+    if cfg.use_fsdp:
+        if int(os.environ.get("WORLD_SIZE", -1)) <= 0:
+            raise RuntimeError(
+                "use_fsdp=True 需 torchrun 启动，请使用: "
+                "torchrun --standalone --nnodes 1 --nproc-per-node 1 scripts/distillation_cogact.py --use_fsdp True ..."
+            )
+        torch.cuda.set_device(overwatch.local_rank())
+        device = torch.device("cuda", overwatch.local_rank())
+        from distillation.fsdp import wrap_teacher_with_fsdp
+
+        teacher = wrap_teacher_with_fsdp(
+            teacher,
+            use_cpu_offload=cfg.use_cpu_offload,
+            use_bf16=cfg.use_bf16,
+            reduce_in_full_precision=cfg.reduce_in_full_precision,
+        )
+        dist.barrier()
+    else:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        if cfg.use_bf16:
+            teacher.vlm = teacher.vlm.to(torch.bfloat16)
+        teacher = teacher.to(device)
+
+    # C. 加载学生、DataLoader、optimizer
     token_size = teacher.llm_backbone.llm.lm_head.in_features  # 4096
     student = load_student(
         token_size=token_size,
@@ -58,7 +88,7 @@ def train_distillation(cfg: DistillationConfig, hf_token: Optional[str] = None) 
 
     optimizer = torch.optim.AdamW(student.parameters(), lr=cfg.lr)
 
-    # B. 训练
+    # D. 训练
     batch_count = 0
     for epoch in range(cfg.epochs):
         for batch in dataloader:
