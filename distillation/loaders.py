@@ -27,7 +27,7 @@ def load_teacher(
     teacher = load_vla(
         str(checkpoint_path),
         hf_token=hf_token,
-        load_for_training=False,
+        load_for_training=True,  # 与原版一致，走 HF 分片加载路径，降低 FSDP init 时 OOM 风险
         action_model_type=action_model_type,
         future_action_window_size=future_action_window_size,
         **kwargs,

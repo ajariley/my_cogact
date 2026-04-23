@@ -618,10 +618,13 @@ class GaussianDiffusion:
         device=None,
         progress=False,
         eta=0.0,
+        grad_enabled: bool = False,
     ):
         """
         Generate samples from the model using DDIM.
         Same usage as p_sample_loop().
+        If grad_enabled=True, runs the sampling steps without torch.no_grad() so loss
+        can backprop through the student (distillation training).
         """
         final = None
         for sample in self.ddim_sample_loop_progressive(
@@ -635,6 +638,7 @@ class GaussianDiffusion:
             device=device,
             progress=progress,
             eta=eta,
+            grad_enabled=grad_enabled,
         ):
             final = sample
         return final["sample"]
@@ -651,6 +655,7 @@ class GaussianDiffusion:
         device=None,
         progress=False,
         eta=0.0,
+        grad_enabled: bool = False,
     ):
         """
         Use DDIM to sample from the model and yield intermediate samples from
@@ -674,7 +679,7 @@ class GaussianDiffusion:
 
         for i in indices:
             t = th.tensor([i] * shape[0], device=device)
-            with th.no_grad():
+            if grad_enabled:
                 out = self.ddim_sample(
                     model,
                     img,
@@ -685,8 +690,20 @@ class GaussianDiffusion:
                     model_kwargs=model_kwargs,
                     eta=eta,
                 )
-                yield out
-                img = out["sample"]
+            else:
+                with th.no_grad():
+                    out = self.ddim_sample(
+                        model,
+                        img,
+                        t,
+                        clip_denoised=clip_denoised,
+                        denoised_fn=denoised_fn,
+                        cond_fn=cond_fn,
+                        model_kwargs=model_kwargs,
+                        eta=eta,
+                    )
+            yield out
+            img = out["sample"]
 
     def _vb_terms_bpd(
             self, model, x_start, x_t, t, clip_denoised=True, model_kwargs=None

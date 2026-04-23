@@ -44,9 +44,51 @@ def get_cognition_features(
     else:
         raise ValueError("No vision backbone found")
 
+    # attention_mask and shape checks (debug-only; no behavior change).
+    if attention_mask.dim() != 2:
+        raise RuntimeError(
+            f"attention_mask must be 2D [B, L], got shape={tuple(attention_mask.shape)}"
+        )
+    if last_hidden.dim() != 3:
+        raise RuntimeError(
+            f"last_hidden must be 3D [B, L, D], got shape={tuple(last_hidden.shape)}"
+        )
+    if attention_mask.size(0) != last_hidden.size(0):
+        raise RuntimeError(
+            "batch size mismatch between attention_mask and last_hidden: "
+            f"attention_mask.shape={tuple(attention_mask.shape)}, "
+            f"last_hidden.shape={tuple(last_hidden.shape)}"
+        )
+    if num_patch < 0 or num_patch > last_hidden.size(1):
+        raise RuntimeError(
+            "invalid num_patch for hidden states: "
+            f"num_patch={num_patch}, last_hidden_seq_len={last_hidden.size(1)}"
+        )
+    if attention_mask.size(1) < last_hidden.size(1):
+        raise RuntimeError(
+            "attention_mask sequence shorter than hidden states before vision-token crop: "
+            f"attention_mask.shape={tuple(attention_mask.shape)}, "
+            f"last_hidden.shape={tuple(last_hidden.shape)}, num_patch={num_patch}"
+        )
+    if torch.any(attention_mask.sum(dim=1) == 0):
+        raise RuntimeError(
+            "attention_mask has at least one all-zero row, cannot locate valid token."
+        )
+
     last_hidden = last_hidden[:, num_patch:]
     cumulative_sum = attention_mask.cumsum(dim=1)
     last_true_indices = (cumulative_sum == cumulative_sum.max(dim=1, keepdim=True)[0]).float().argmax(dim=1)
+    
+    max_index = int(last_true_indices.max().item())
+    seq_len_after_patch = last_hidden.size(1)
+    if max_index >= seq_len_after_patch:
+        raise RuntimeError(
+            "gather index out of bounds in get_cognition_features: "
+            f"max(last_true_indices)={max_index}, "
+            f"last_hidden.size(1)={seq_len_after_patch}, "
+            f"attention_mask.shape={tuple(attention_mask.shape)}, "
+            f"num_patch={num_patch}"
+        )
     expanded_indices = last_true_indices.unsqueeze(-1).expand(-1, last_hidden.size(-1))
     cognition_features = last_hidden.gather(1, expanded_indices.unsqueeze(1))  # [B, 1, D]
     return cognition_features
@@ -135,6 +177,7 @@ def run_student_ddim(
         device=device,
         progress=False,
         eta=0.0,
+        grad_enabled=True,
     )
     return x0_student
 

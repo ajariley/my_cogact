@@ -6,6 +6,7 @@
 """
 
 import torch
+import torch.distributed as dist
 from torch.distributed.fsdp import (
     FullyShardedDataParallel as FSDP,
     MixedPrecision,
@@ -21,7 +22,7 @@ overwatch = initialize_overwatch(__name__)
 
 def wrap_teacher_with_fsdp(
     teacher: CogACT,
-    use_cpu_offload: bool = True,
+    use_cpu_offload: bool = False,
     use_bf16: bool = True,
     reduce_in_full_precision: bool = True,
 ) -> CogACT:
@@ -63,6 +64,12 @@ def wrap_teacher_with_fsdp(
     # Step 3: CPUOffload
     cpu_offload = CPUOffload(offload_params=use_cpu_offload)
     overwatch.info(f"CPU Offload: offload_params={use_cpu_offload}")
+
+    # 单卡时 FSDP 退化为 NO_SHARD，无跨卡分片
+    if dist.is_initialized() and dist.get_world_size() == 1:
+        overwatch.info(
+            "World size=1: FSDP 将退化为 NO_SHARD，无跨卡分片。若 OOM，可尝试 use_fsdp=False + use_bf16=True。"
+        )
 
     # Step 4: FSDP wrap
     teacher = FSDP(
