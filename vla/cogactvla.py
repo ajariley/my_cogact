@@ -109,9 +109,11 @@ class CogACT(nn.Module):
         return_dict: Optional[bool] = None,
         repeated_diffusion_steps: int = 4,
         action_masks = None,
+        return_cognition_features: bool = False,
     ) -> Tuple:
         """Run a forward pass through the VLM, returning a CausalLMOutputWithPast instance (contains loss)."""
         
+        overwatch.info(f">>  [cogactvla-self.vlm] input_ids shape")
         output: CausalLMOutputWithPast = self.vlm(
             input_ids=input_ids,
             attention_mask=attention_mask,
@@ -124,8 +126,16 @@ class CogACT(nn.Module):
             output_hidden_states=output_hidden_states,
             return_dict=return_dict,
         )
+        overwatch.info(f">>  [cogactvla-self.vlm] output shape:")
 
+        # import pdb 
+        # pdb.set_trace()
         # extract the last hidden state and the learnable EOS token feature
+        if output.hidden_states is None:
+            raise RuntimeError(
+                "CogACT.forward needs hidden states to build cognition_features. "
+                "Call it with output_hidden_states=True."
+            )
         last_hidden = output.hidden_states[-1]
 
         # extract the visual token number
@@ -143,6 +153,10 @@ class CogACT(nn.Module):
         last_true_indices = (cumulative_sum == cumulative_sum.max(dim=1, keepdim=True)[0]).float().argmax(dim=1)  
         expanded_indices = last_true_indices.unsqueeze(-1).expand(-1, last_hidden.size(-1))  
         cognition_features = last_hidden.gather(1, expanded_indices.unsqueeze(1))  # [B, 1, D]
+
+        # FSDP-friendly feature extraction path for distillation/debug callers.
+        if return_cognition_features:
+            return cognition_features
 
         actions_history = actions[:,0:self.past_action_window_size,:]
         actions_future = actions[:, -(self.future_action_window_size+1):, :]

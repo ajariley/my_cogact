@@ -72,3 +72,6 @@ if __name__ == "__main__":
 
         traceback.print_exc()
         raise
+    finally:
+        if torch.distributed.is_available() and torch.distributed.is_initialized():
+            torch.distributed.destroy_process_group()

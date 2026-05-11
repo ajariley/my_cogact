@@ -10,6 +10,11 @@ import draccus
 from vla import load_vla, CogACT
 from action_model.action_model import ActionModel
 from prismatic.vla import get_vla_dataset_and_collator
+from prismatic.overwatch import initialize_overwatch
+
+from torch.cuda.amp import autocast
+
+overwatch = initialize_overwatch(__name__)
 
 def get_cognition_features(
     teacher: CogACT,
@@ -28,69 +33,30 @@ def get_cognition_features(
     else:
         pixel_values = pixel_values.to(device)
 
-    with torch.no_grad():
-        output = teacher.vlm(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-            pixel_values=pixel_values,
-            output_hidden_states=True,
-        )
-
-    last_hidden = output.hidden_states[-1]
-    if teacher.vlm.vision_backbone.featurizer is not None:
-        num_patch = teacher.vlm.vision_backbone.featurizer.patch_embed.num_patches
-    elif hasattr(teacher.vlm.vision_backbone, "siglip_featurizer") and teacher.vlm.vision_backbone.siglip_featurizer is not None:
-        num_patch = teacher.vlm.vision_backbone.siglip_featurizer.patch_embed.num_patches
-    else:
-        raise ValueError("No vision backbone found")
-
-    # attention_mask and shape checks (debug-only; no behavior change).
-    if attention_mask.dim() != 2:
+    overwatch.info(
+        f">>  [distill_debug] teacher.vlm forward "
+    )
+    with autocast(dtype=torch.bfloat16):
+        with torch.no_grad():
+            cognition_features = teacher(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                pixel_values=pixel_values,
+                output_hidden_states=True,
+                return_cognition_features=True,
+            )
+    overwatch.info(
+        f">>  [distill_debug] teacher.vlm forward completed"
+    )
+    if cognition_features.dim() != 3:
         raise RuntimeError(
-            f"attention_mask must be 2D [B, L], got shape={tuple(attention_mask.shape)}"
+            f"cognition_features must be 3D [B, 1, D], got shape={tuple(cognition_features.shape)}"
         )
-    if last_hidden.dim() != 3:
+    if cognition_features.size(0) != input_ids.size(0) or cognition_features.size(1) != 1:
         raise RuntimeError(
-            f"last_hidden must be 3D [B, L, D], got shape={tuple(last_hidden.shape)}"
+            "cognition_features shape mismatch: "
+            f"features={tuple(cognition_features.shape)}, input_ids={tuple(input_ids.shape)}"
         )
-    if attention_mask.size(0) != last_hidden.size(0):
-        raise RuntimeError(
-            "batch size mismatch between attention_mask and last_hidden: "
-            f"attention_mask.shape={tuple(attention_mask.shape)}, "
-            f"last_hidden.shape={tuple(last_hidden.shape)}"
-        )
-    if num_patch < 0 or num_patch > last_hidden.size(1):
-        raise RuntimeError(
-            "invalid num_patch for hidden states: "
-            f"num_patch={num_patch}, last_hidden_seq_len={last_hidden.size(1)}"
-        )
-    if attention_mask.size(1) < last_hidden.size(1):
-        raise RuntimeError(
-            "attention_mask sequence shorter than hidden states before vision-token crop: "
-            f"attention_mask.shape={tuple(attention_mask.shape)}, "
-            f"last_hidden.shape={tuple(last_hidden.shape)}, num_patch={num_patch}"
-        )
-    if torch.any(attention_mask.sum(dim=1) == 0):
-        raise RuntimeError(
-            "attention_mask has at least one all-zero row, cannot locate valid token."
-        )
-
-    last_hidden = last_hidden[:, num_patch:]
-    cumulative_sum = attention_mask.cumsum(dim=1)
-    last_true_indices = (cumulative_sum == cumulative_sum.max(dim=1, keepdim=True)[0]).float().argmax(dim=1)
-    
-    max_index = int(last_true_indices.max().item())
-    seq_len_after_patch = last_hidden.size(1)
-    if max_index >= seq_len_after_patch:
-        raise RuntimeError(
-            "gather index out of bounds in get_cognition_features: "
-            f"max(last_true_indices)={max_index}, "
-            f"last_hidden.size(1)={seq_len_after_patch}, "
-            f"attention_mask.shape={tuple(attention_mask.shape)}, "
-            f"num_patch={num_patch}"
-        )
-    expanded_indices = last_true_indices.unsqueeze(-1).expand(-1, last_hidden.size(-1))
-    cognition_features = last_hidden.gather(1, expanded_indices.unsqueeze(1))  # [B, 1, D]
     return cognition_features
 
 
@@ -114,24 +80,116 @@ def run_teacher_with_recording(
     }
     """
     # 1. VLM 前向得到 cognition_features
+
+    overwatch.info(
+        f">> [distill_debug] get_cognition_features batch_shape={tuple(batch['input_ids'].shape)}"
+    )
     z_corr = get_cognition_features(teacher, batch, device)
+
+    overwatch.info(
+        f">> [distill_debug] zorr_calculating completed z_corr_shape={tuple(z_corr.shape)}"
+    )
+
+    # Debug checkpoint: validate z_corr shape early to avoid async CUDA failures later.
+    if z_corr.dim() != 3:
+        raise RuntimeError(
+            f"z_corr must be 3D [B, 1, D], got shape={tuple(z_corr.shape)}"
+        )
+    B_from_actions = int(batch["actions"].shape[0])
+    if z_corr.size(0) != B_from_actions or z_corr.size(1) != 1:
+        raise RuntimeError(
+            "z_corr shape mismatch: "
+            f"z_corr.shape={tuple(z_corr.shape)}, expected [B, 1, D] with B={B_from_actions}"
+        )
+    print(
+        f"[distill_debug] run_teacher_with_recording z_corr_shape={tuple(z_corr.shape)}",
+        flush=True,
+    )
     B = z_corr.shape[0]                                                 # batch size
     model_dtype = next(teacher.action_model.net.parameters()).dtype     # ActionModel 的 dtype, float32 or float16
-    z_corr = z_corr.to(model_dtype)                                     # 将 cognition_features 转换为 ActionModel 的 dtype,避免混合精度导致类型不匹配
+    z_corr = z_corr.to(dtype=model_dtype)                               # 将 cognition_features 转换为 ActionModel 的 dtype,避免混合精度导致类型不匹配
 
     # 2. CFG：双倍 batch，z = [z_corr, uncondition] 
     uncondition = teacher.action_model.net.z_embedder.uncondition # [1, D]
-    uncondition = uncondition.unsqueeze(0).expand(B, 1, -1).to(device)
+
+    # 2.1 Debug checkpoint: validate uncondition shape early to avoid async CUDA failures later.
+    if uncondition.dim() != 2:
+        raise RuntimeError(
+            f"uncondition must be 2D [1, D], got shape={tuple(uncondition.shape)}"
+        )
+    if uncondition.size(0) != 1:
+        raise RuntimeError(
+            f"uncondition first dim must be 1, got shape={tuple(uncondition.shape)}"
+        )
+    if uncondition.size(1) != z_corr.size(2):
+        raise RuntimeError(
+            "uncondition and z_corr hidden dim mismatch: "
+            f"uncondition.shape={tuple(uncondition.shape)}, z_corr.shape={tuple(z_corr.shape)}"
+        )
+    
+    # 2
+    uncondition = uncondition.unsqueeze(0).expand(B, 1, -1).to(device=device, dtype=model_dtype)
+    
+    # 2.2 Debug checkpoint: validate uncondition shape early to avoid async CUDA failures later.
+    if uncondition.shape != z_corr.shape:
+        raise RuntimeError(
+            "expanded uncondition shape mismatch with z_corr: "
+            f"uncondition.shape={tuple(uncondition.shape)}, z_corr.shape={tuple(z_corr.shape)}"
+        )
+    overwatch.info(
+        f">> [*] [distill_debug] run_teacher_with_recording uncondition_shape={tuple(uncondition.shape)}"
+    )
+    
+    # 2
     z = torch.cat([z_corr, uncondition], dim=0)
-    noise_cfg = torch.cat([noise, noise], dim=0)
+    noise_cfg = torch.cat([noise, noise], dim=0).to(device=device, dtype=model_dtype)
     model_kwargs = dict(z=z, cfg_scale=cfg_scale)
     sample_fn = teacher.action_model.net.forward_with_cfg               # 带CFG的forward函数，传入采样循环，用来预测噪声，定义在action_model.py中
+    print(
+        "[distill_debug] pre_ddim_sampling "
+        f"noise_cfg(shape={tuple(noise_cfg.shape)}, dtype={noise_cfg.dtype}, device={noise_cfg.device}) "
+        f"z(shape={tuple(z.shape)}, dtype={z.dtype}, device={z.device}) "
+        f"cfg_scale={cfg_scale}",
+        flush=True,
+    )
+
+    _sample_fn_logged = False
+
+    def sample_fn_with_debug(*args, **kwargs):
+        nonlocal _sample_fn_logged
+        if not _sample_fn_logged:
+            x = args[0] if len(args) > 0 and isinstance(args[0], torch.Tensor) else None
+            t = args[1] if len(args) > 1 and isinstance(args[1], torch.Tensor) else None
+            z_in = kwargs.get("z", None)
+            z_msg = (
+                f"shape={tuple(z_in.shape)} dtype={z_in.dtype} device={z_in.device}"
+                if isinstance(z_in, torch.Tensor)
+                else str(type(z_in))
+            )
+            x_msg = (
+                f"shape={tuple(x.shape)} dtype={x.dtype} device={x.device}"
+                if isinstance(x, torch.Tensor)
+                else "N/A"
+            )
+            t_msg = (
+                f"shape={tuple(t.shape)} dtype={t.dtype} device={t.device}"
+                if isinstance(t, torch.Tensor)
+                else "N/A"
+            )
+            print(
+                "[distill_debug] enter_forward_with_cfg "
+                f"x({x_msg}) t({t_msg}) z({z_msg})",
+                flush=True,
+            )
+            _sample_fn_logged = True
+        return sample_fn(*args, **kwargs)
+    # debug结束
 
     # 3. DDIM 采样
     teacher.action_model.create_ddim(ddim_step=num_steps)
     trajectory = []
     for out in teacher.action_model.ddim_diffusion.ddim_sample_loop_progressive(# 采样循环，定义在ddim_diffusion.py中
-        sample_fn,
+        sample_fn_with_debug,
         noise_cfg.shape,
         noise=noise_cfg,
         clip_denoised=False,
@@ -180,4 +238,3 @@ def run_student_ddim(
         grad_enabled=True,
     )
     return x0_student
-

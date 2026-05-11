@@ -11,6 +11,7 @@ from typing import Dict, Optional, Any
 import torch
 from torch.utils.data import DataLoader
 import draccus
+from torch.cuda.amp import autocast
 
 # 分布式
 import torch.distributed as dist
@@ -54,6 +55,22 @@ def train_distillation(cfg: DistillationConfig, hf_token: Optional[str] = None) 
     """
     device: torch.device
 
+    # Support both --teacher_checkpoint and --pretrained_checkpoint CLI flags.
+    checkpoint_input = cfg.pretrained_checkpoint or cfg.teacher_checkpoint
+    checkpoint_path = Path(checkpoint_input)
+    if checkpoint_path.is_dir():
+        # Allow passing run dir, e.g. /path/to/CogACT-Base
+        candidate = checkpoint_path / "checkpoints" / "CogACT-Base.pt"
+        if candidate.exists():
+            checkpoint_path = candidate
+        else:
+            pt_files = sorted((checkpoint_path / "checkpoints").glob("*.pt"))
+            if not pt_files:
+                raise FileNotFoundError(
+                    f"No checkpoint .pt found under directory: {checkpoint_path / 'checkpoints'}"
+                )
+            checkpoint_path = pt_files[-1]
+
     # A. FSDP 模式：先设置设备、清空显存（与 scripts/train.py:131-132 对齐）
     if cfg.use_fsdp:
         if int(os.environ.get("WORLD_SIZE", -1)) <= 0:
@@ -68,12 +85,13 @@ def train_distillation(cfg: DistillationConfig, hf_token: Optional[str] = None) 
             log_memory("after_cuda_init_fsdp", log_tf=cfg.log_memory_tf)
 
     # B. 加载教师，并强制置于 CPU（避免 HF inference 等路径将模型加载到 GPU，导致 FSDP init OOM）
-    teacher = load_teacher(
-        cfg.teacher_checkpoint,
-        cfg.action_model_type_teacher,
-        cfg.future_action_window_size,
-        hf_token=hf_token,
-    )
+    with autocast(dtype=torch.bfloat16):
+        teacher = load_teacher(
+            checkpoint_path,
+            cfg.action_model_type_teacher,
+            cfg.future_action_window_size,
+            hf_token=hf_token,
+        )
     if cfg.log_memory:
         log_memory("after_load_teacher", log_tf=cfg.log_memory_tf)
     teacher = teacher.cpu()
@@ -91,7 +109,8 @@ def train_distillation(cfg: DistillationConfig, hf_token: Optional[str] = None) 
             use_bf16=cfg.use_bf16,
             reduce_in_full_precision=cfg.reduce_in_full_precision,
         )
-        dist.barrier()
+        # Explicitly bind barrier to this rank's GPU to avoid NCCL "unknown device" warning.
+        dist.barrier(device_ids=[overwatch.local_rank()])
         if cfg.log_memory:
             log_memory("after_teacher_on_device", log_tf=cfg.log_memory_tf)
     else:
@@ -138,7 +157,12 @@ def train_distillation(cfg: DistillationConfig, hf_token: Optional[str] = None) 
     for epoch in range(cfg.epochs):
         for batch in dataloader:
             if cfg.max_batches is not None and batch_count >= cfg.max_batches:
-                return#提前停下，以供debug
+                overwatch.info(
+                    "\n==========\n"
+                    f"DISTILL STOP | reached max_batches={cfg.max_batches}\n"
+                    "=========="
+                )
+                return  # 提前停下，以供debug
             batch_count += 1
             first_step = batch_count == 1
 
@@ -159,12 +183,32 @@ def train_distillation(cfg: DistillationConfig, hf_token: Optional[str] = None) 
             noise = torch.randn(B, T, C, device=device)
 
             # 2. 教师轨迹（带记录）
+            if cfg.log_memory and first_step:
+                overwatch.info(
+                    f"[distill_debug] step={batch_count} rank={overwatch.rank()} "
+                    f"before_run_teacher_with_recording "
+                    f"input_ids={tuple(batch['input_ids'].shape)} "
+                    f"attention_mask={tuple(batch['attention_mask'].shape)} "
+                    f"actions={tuple(batch['actions'].shape)} "
+                    f"noise={tuple(noise.shape)}"
+                )
             with torch.no_grad():
                 teacher_results = run_teacher_with_recording(
                     teacher, batch, noise,
                     num_steps=cfg.num_ddim_steps_teacher,
                     cfg_scale=cfg.cfg_scale_teacher,
                     device=device,
+                )
+            if cfg.log_memory and first_step:
+                z_corr_shape = (
+                    tuple(teacher_results["z_corr"].shape)
+                    if isinstance(teacher_results.get("z_corr"), torch.Tensor)
+                    else "N/A"
+                )
+                overwatch.info(
+                    f"[distill_debug] step={batch_count} rank={overwatch.rank()} "
+                    f"after_run_teacher_with_recording "
+                    f"z_corr={z_corr_shape}"
                 )
 
             if cfg.log_memory and first_step:
@@ -188,8 +232,22 @@ def train_distillation(cfg: DistillationConfig, hf_token: Optional[str] = None) 
                 batch_wrong = dict(batch)
                 batch_wrong["input_ids"] = batch["input_ids"][shuffle_idx]
                 batch_wrong["attention_mask"] = batch["attention_mask"][shuffle_idx]
+                if cfg.log_memory and first_step:
+                    overwatch.info(
+                        f"[distill_debug] step={batch_count} rank={overwatch.rank()} "
+                        f"before_get_cognition_features_wrong "
+                        f"shuffle_idx={tuple(shuffle_idx.shape)} "
+                        f"wrong_input_ids={tuple(batch_wrong['input_ids'].shape)} "
+                        f"wrong_attention_mask={tuple(batch_wrong['attention_mask'].shape)}"
+                    )
                 with torch.no_grad():
                     z_wrong = get_cognition_features(teacher, batch_wrong, device)
+                if cfg.log_memory and first_step:
+                    overwatch.info(
+                        f"[distill_debug] step={batch_count} rank={overwatch.rank()} "
+                        f"after_get_cognition_features_wrong "
+                        f"z_wrong={tuple(z_wrong.shape)}"
+                    )
                 x0_student_wrong = run_student_ddim(
                     student, noise, z_wrong, cfg.num_ddim_steps_student, device
                 )
@@ -208,6 +266,13 @@ def train_distillation(cfg: DistillationConfig, hf_token: Optional[str] = None) 
             optimizer.zero_grad()
             loss_dict["total"].backward()
             optimizer.step()
+            overwatch.info(
+                "\n==========\n"
+                "DISTILL STEP DONE\n"
+                f"epoch={epoch + 1}/{cfg.epochs} step={batch_count} "
+                f"loss={loss_dict['total'].item():.6f}\n"
+                "=========="
+            )
 
             if cfg.log_memory and first_step:
                 _sync_cuda()
@@ -216,4 +281,3 @@ def train_distillation(cfg: DistillationConfig, hf_token: Optional[str] = None) 
     # 6. 保存学生
     cfg.output_dir.mkdir(parents=True, exist_ok=True)
     torch.save(student.state_dict(), cfg.output_dir / "student_final.pt")
-

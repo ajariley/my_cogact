@@ -15,11 +15,12 @@ from prismatic.vla import get_vla_dataset_and_collator
 
 @dataclass
 class DistillationConfig:
+    pretrained_checkpoint: Optional[Path] = None
     teacher_checkpoint: Path = Path("/home/huangjiaqi/projects/CogACT-Base/checkpoints/CogACT-Base.pt")
     data_root_dir: Path = Path("datasets/open-x-embodiment")
     data_mix: str = "bridge"
     output_dir: Path = Path("runs/distillation")
-    batch_size: int = 4
+    batch_size: int = 1
     max_batches: Optional[int] = None
     epochs: int = 10
     lr: float = 1e-4
@@ -47,7 +48,6 @@ class DistillationConfig:
     log_memory_tf: bool = True
 
     # 在 DistillationConfig 中添加（参考 conf/vla.py 的 shuffle_buffer_size）
-    shuffle_buffer_size: int = 256_000   # bridge 用 256k，oxe_magic_soup 用 250k
+    shuffle_buffer_size: int = 1_024   # 单卡先跑通流程；正式训练可调回 bridge 常用的 256k
     image_aug: bool = False
     load_all_data_for_training: bool = True
-
