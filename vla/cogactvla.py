@@ -113,7 +113,6 @@ class CogACT(nn.Module):
     ) -> Tuple:
         """Run a forward pass through the VLM, returning a CausalLMOutputWithPast instance (contains loss)."""
         
-        overwatch.info(f">>  [cogactvla-self.vlm] input_ids shape")
         output: CausalLMOutputWithPast = self.vlm(
             input_ids=input_ids,
             attention_mask=attention_mask,
@@ -126,7 +125,6 @@ class CogACT(nn.Module):
             output_hidden_states=output_hidden_states,
             return_dict=return_dict,
         )
-        overwatch.info(f">>  [cogactvla-self.vlm] output shape:")
 
         # import pdb 
         # pdb.set_trace()

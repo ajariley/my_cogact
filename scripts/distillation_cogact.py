@@ -25,7 +25,7 @@ os.environ["TF_FORCE_GPU_ALLOW_GROWTH"] = "true"   # TF 按需申请显存，而
 # Disable with: COGACT_LOG_MEMORY_EARLY=0
 _PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if os.environ.get("COGACT_LOG_MEMORY_EARLY", "1") != "0":
-    _mem_path = _PROJECT_ROOT / "distillation" / "memory_log.py"
+    _mem_path = _PROJECT_ROOT / "distillation" / "log.py"
     _spec = importlib.util.spec_from_file_location("_cogact_memory_log", _mem_path)
     if _spec and _spec.loader:
         _mem_mod = importlib.util.module_from_spec(_spec)
@@ -46,7 +46,7 @@ from prismatic.vla import get_vla_dataset_and_collator
 sys.path.insert(0, str(_PROJECT_ROOT))
 # 配置，工具函数导入
 from distillation import train_distillation
-from distillation.memory_log import log_memory
+from distillation.log import log_memory
 from conf import DistillationConfig
 
 

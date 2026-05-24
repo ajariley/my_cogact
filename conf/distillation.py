@@ -2,7 +2,7 @@
 
 from pathlib import Path
 from dataclasses import dataclass
-from typing import Dict, Optional, Any
+from typing import Dict, Optional, Any, Tuple
 
 import torch
 from torch.utils.data import DataLoader
@@ -20,10 +20,18 @@ class DistillationConfig:
     data_root_dir: Path = Path("datasets/open-x-embodiment")
     data_mix: str = "bridge"
     output_dir: Path = Path("runs/distillation")
+    resume_checkpoint: Optional[Path] = None
+    checkpoint_interval: int = 100
+    checkpoint_suffix: str = ""
+    metric_header_interval: int = 20
     batch_size: int = 1
     max_batches: Optional[int] = None
     epochs: int = 10
-    lr: float = 1e-4
+    lr: float = 1e-4  # Deprecated alias; distillation uses base_lr for the optimizer schedule.
+    base_lr: float = 1e-4
+    min_lr: float = 1e-6
+    warmup_ratio: float = 0.05
+    max_grad_norm: float = 10.0
     num_ddim_steps_teacher: int = 10
     num_ddim_steps_student: int = 4
     action_model_type_teacher: str = "DiT-B"
@@ -46,8 +54,19 @@ class DistillationConfig:
     use_instruction_constraint: bool = True  # 指令敏感：同图+错误指令→z_wrong，L_neg 拉大学生(corr)与(wrong)距离
     log_memory: bool = False
     log_memory_tf: bool = True
+    eval_seed: int = 42
+    eval_cache_path: Optional[Path] = None
+
+    # Experiment tracking. JSONL is always written locally; add "wandb" or "swanlab" for dashboards.
+    trackers: Tuple[str, ...] = ("jsonl",)
+    run_id: Optional[str] = None
+    wandb_project: str = "cogact-distillation"
+    wandb_entity: Optional[str] = None
+    swanlab_project: str = "cogact-distillation"
+    swanlab_workspace: Optional[str] = None
+    swanlab_mode: Optional[str] = None
 
     # 在 DistillationConfig 中添加（参考 conf/vla.py 的 shuffle_buffer_size）
-    shuffle_buffer_size: int = 1_024   # 单卡先跑通流程；正式训练可调回 bridge 常用的 256k
+    shuffle_buffer_size: int = 256000   # 单卡先跑通流程；正式训练可调回 bridge 常用的 256k
     image_aug: bool = False
     load_all_data_for_training: bool = True

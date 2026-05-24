@@ -1,6 +1,11 @@
 import os
+import json
 import subprocess
-from typing import List, Optional
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
+
+
+DEFAULT_METRIC_HEADER_INTERVAL = 20
 
 # Intentionally no `import torch` at module level so this file can be loaded via
 # importlib before torch/tensorflow for baseline snapshots.
@@ -202,3 +207,145 @@ def log_memory(tag: str, log_tf: bool = True, empty_cache: bool = False) -> None
         parts.extend(_collect_tf_gpu_memory())
 
     print(" | ".join(parts), flush=True)
+
+
+def format_metric_header() -> str:
+    return (
+        "step | total   | task    | final   | grad    | lr       | "
+        "actions    | z_corr      | x0\n"
+        "-----+---------+---------+---------+---------+----------+"
+        "------------+-------------+------------"
+    )
+
+
+def format_metric_row(
+    step: int,
+    loss_total: float,
+    loss_task: float,
+    loss_final: float,
+    grad_norm: float | None,
+    lr: float,
+    actions_shape,
+    z_corr_shape,
+    x0_shape,
+) -> str:
+    grad = f"{grad_norm:.4f}" if grad_norm is not None else "-"
+    return (
+        f"{step:<4} | "
+        f"{loss_total:<7.4f} | "
+        f"{loss_task:<7.4f} | "
+        f"{loss_final:<7.4f} | "
+        f"{grad:<7} | "
+        f"{lr:<8.2e} | "
+        f"{str(tuple(actions_shape)):<10} | "
+        f"{str(tuple(z_corr_shape)):<11} | "
+        f"{str(tuple(x0_shape)):<10}"
+    )
+
+
+def format_metric_line(
+    *,
+    step: int,
+    epoch: int,
+    epochs: int,
+    loss_total: float,
+    loss_task: float,
+    loss_final: float,
+    grad_norm: float | None,
+    lr: float,
+) -> str:
+    grad = f"{grad_norm:.4f}" if grad_norm is not None else "-"
+    return (
+        f"step={step} "
+        f"epoch={epoch}/{epochs} "
+        f"total={loss_total:.4f} "
+        f"task={loss_task:.4f} "
+        f"final={loss_final:.4f} "
+        f"grad={grad} "
+        f"lr={lr:.2e}"
+    )
+
+
+def append_metrics_jsonl(path: Path, metrics: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(metrics, ensure_ascii=False) + "\n")
+
+
+class DistillationTrackers:
+    def __init__(
+        self,
+        *,
+        trackers: Tuple[str, ...],
+        run_id: str,
+        output_dir: Path,
+        hparams: Dict[str, Any],
+        wandb_project: str,
+        wandb_entity: Optional[str],
+        swanlab_project: str,
+        swanlab_workspace: Optional[str],
+        swanlab_mode: Optional[str],
+        enabled: bool = True,
+    ) -> None:
+        self.enabled = enabled
+        self.backends: List[Tuple[str, Any]] = []
+        if not self.enabled:
+            return
+
+        output_dir.mkdir(parents=True, exist_ok=True)
+        for tracker in trackers:
+            if tracker == "jsonl":
+                continue
+            if tracker == "wandb":
+                import wandb
+
+                wandb.init(
+                    name=run_id,
+                    dir=str(output_dir),
+                    config=hparams,
+                    project=wandb_project,
+                    entity=wandb_entity,
+                    group="distillation",
+                )
+                self.backends.append(("wandb", wandb))
+            elif tracker == "swanlab":
+                try:
+                    import swanlab
+                except ImportError as e:
+                    raise ImportError(
+                        "swanlab tracker requested but swanlab is not installed. "
+                        "Install it with `pip install swanlab`, or remove `swanlab` from --trackers."
+                    ) from e
+
+                init_kwargs: Dict[str, Any] = {
+                    "project": swanlab_project,
+                    "experiment_name": run_id,
+                    "config": hparams,
+                    "logdir": str(output_dir),
+                }
+                if swanlab_workspace:
+                    init_kwargs["workspace"] = swanlab_workspace
+                if swanlab_mode:
+                    init_kwargs["mode"] = swanlab_mode
+                swanlab.init(**init_kwargs)
+                self.backends.append(("swanlab", swanlab))
+            else:
+                raise ValueError(f"Unsupported tracker `{tracker}`. Use one of: jsonl, wandb, swanlab.")
+
+    def log(self, metrics: Dict[str, Any], step: int) -> None:
+        if not self.enabled:
+            return
+        for name, backend in self.backends:
+            if name == "wandb":
+                backend.log(metrics, step=step)
+            elif name == "swanlab":
+                backend.log(metrics, step=step)
+
+    def finalize(self) -> None:
+        if not self.enabled:
+            return
+        for name, backend in self.backends:
+            if name == "wandb":
+                backend.finish()
+            elif name == "swanlab" and hasattr(backend, "finish"):
+                backend.finish()

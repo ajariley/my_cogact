@@ -1,0 +1,139 @@
+nohup proxy_up torchrun --standalone --nnodes 1 --nproc-per-node 1 scripts/train.py \
+  --pretrained_checkpoint "/home/huangjiaqi/projects/CogACT-Base/checkpoints/CogACT-Base.pt" \
+  --vla.type prism-dinosiglip-224px+oxe+diffusion \
+  --vla.data_mix bridge \
+  --vla.expected_world_size 1 \
+  --vla.global_batch_size 8 \
+  --vla.per_device_batch_size 8 \
+  --vla.learning_rate 2e-5 \
+  --data_root_dir "/home/huangjiaqi/.vscode-server/openvla_data" \
+  --run_root_dir "/home/huangjiaqi/projects/CogACT/runs" \
+  --run_id "cogact_single_gpu_$(date +%Y%m%d_%H%M%S)" \
+  --image_aug True \
+  --save_interval 1000 \
+  --repeated_diffusion_steps 8 \
+  --future_action_window_size 15 \
+  --action_model_type DiT-B \
+  --is_resume False > cogACT.log 2>&1 &
+
+  单卡：
+  export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+  CUDA_VISIBLE_DEVICES=0 nohup proxy_up torchrun --standalone --nnodes 1 --nproc-per-node 1 scripts/train.py \
+  --pretrained_checkpoint "/home/huangjiaqi/projects/CogACT-Base/checkpoints/CogACT-Base.pt" \
+  --vla.type prism-dinosiglip-224px+oxe+diffusion \
+  --vla.train_strategy fsdp-full-shard \
+  --vla.data_mix bridge \
+  --vla.freeze_vision_backbone True \
+  --vla.freeze_llm_backbone True \
+  --vla.expected_world_size 1 \
+  --vla.global_batch_size 1 \
+  --vla.per_device_batch_size 1 \
+  --vla.learning_rate 2e-5 \
+  --data_root_dir "/home/huangjiaqi/.vscode-server/openvla_data" \
+  --run_root_dir "/home/huangjiaqi/projects/CogACT/runs" \
+  --run_id "cogact_single_gpu_$(date +%Y%m%d_%H%M%S)" \
+  --image_aug False \
+  --save_interval 1000 \
+  --repeated_diffusion_steps 1 \
+  --future_action_window_size 8 \
+  --action_model_type DiT-S \
+  --vla.enable_mixed_precision_training True  \
+  --is_resume False > cogACT.log 2>&1 &
+
+
+CUDA_VISIBLE_DEVICES=2 nohup  torchrun --standalone --nnodes 1 --nproc-per-node 1 scripts/train.py \
+  --pretrained_checkpoint "/home/huangjiaqi/projects/CogACT/runs/cogact_single_gpu_20251213_165944/checkpoints/step-001000-epoch-00-loss=0.1695.pt" \
+  --vla.type prism-dinosiglip-224px+oxe+diffusion \
+  --vla.train_strategy fsdp-full-shard \
+  --vla.data_mix bridge \
+  --vla.freeze_vision_backbone True \
+  --vla.freeze_llm_backbone True \
+  --vla.expected_world_size 1 \
+  --vla.global_batch_size 40 \
+  --vla.per_device_batch_size 40 \
+  --vla.learning_rate 2e-5 \
+  --data_root_dir "/home/huangjiaqi/.vscode-server/openvla_data" \
+  --run_root_dir "/home/huangjiaqi/projects/CogACT/runs" \
+  --run_id "cogact_single_gpu_$(date +%Y%m%d_%H%M%S)" \
+  --image_aug False \
+  --save_interval 1000 \
+  --repeated_diffusion_steps 8 \
+  --future_action_window_size 15 \
+  --action_model_type DiT-S \
+  --vla.enable_mixed_precision_training True  \
+  --vla.max_steps 10000 \
+  --is_resume True \
+  --resume_step 1000 \
+  --resume_epoch 0 > cogACT.log 2>&1 &
+
+/home/huangjiaqi/.vscode-server/openvla_data/bridge_orig
+
+
+
+
+
+
+
+2026.3.14
+ PYTHONPATH=/home/huangjiaqi/projects/CogACT
+ CUDA_VISIBLE_DEVICES=1 nohup proxy_up python scripts/distillation_cogact.py  \
+  --data_root_dir "/home/huangjiaqi/.vscode-server/openvla_data" \
+  --data_mix bridge \
+  --vla.train_strategy fsdp-full-shard \
+  --max_batch 1 >scripts/distillation.log 2>&1 &
+
+2026.4.23 最新
+# FSDP 模式（需 torchrun）
+
+ PYTHONPATH=. \
+ CUDA_VISIBLE_DEVICES=1 \
+  HF_HOME=/home/huangjiaqi/.cache/huggingface \
+  HF_HUB_OFFLINE=1 \
+  nohup proxy_up torchrun --standalone --nnodes 1 \
+  --nproc-per-node 1 scripts/distillation_cogact.py \
+  --use_fsdp False --use_cpu_offload False --use_bf16 True --reduce_in_full_precision True \
+  --data_root_dir "/home/huangjiaqi/.vscode-server/openvla_data" \
+  --pretrained_checkpoint "/home/huangjiaqi/projects/CogACT-Base" \
+  --checkpoint_suffix "1" \
+  --trackers "['jsonl','wandb']" \
+  --run_id distill-006-lambdatraj-0.7 \
+  --wandb_project cogact-distillation \
+  --data_mix bridge \
+  --log_memory False \
+  --log_memory_tf False \
+  --batch_size 4 --max_batches 5000 \
+  --shuffle_buffer_size 1024 \
+  --num_ddim_steps_teacher 20 --num_ddim_steps_student 4 \
+  >scripts/distillation.log 2>&1 &
+
+--trackers "['jsonl','wandb']" \
+
+
+
+  PYTHONPATH=/home/huangjiaqi/projects/CogACT python scripts/distillation_cogact.py --max_batches 1
+
+
+  # 项目根目录下
+PYTHONPATH=/home/huangjiaqi/projects/CogACT python scripts/distillation_cogact.py --batch_size 4
+
+# 或使用 torchrun（FSDP）
+PYTHONPATH=/home/huangjiaqi/projects/CogACT torchrun --standalone --nnodes 1 --nproc-per-node 1 scripts/distillation_cogact.py --use_fsdp True ...
+
+
+
+
+
+# eval
+5.20
+PYTHONPATH=. CUDA_VISIBLE_DEVICES=1 \
+ nohup proxy_up   python scripts/eval_distillation.py \
+  --use_fsdp False \
+  --data_root_dir "/home/huangjiaqi/.vscode-server/openvla_data" \
+  --pretrained_checkpoint "/home/huangjiaqi/projects/CogACT-Base" \
+  --resume_checkpoint runs/distillation/checkpoint_final.pt \
+  --data_mix bridge \
+  --batch_size 1 \
+  --max_batches 100 \
+  --num_ddim_steps_teacher 20 \
+  --num_ddim_steps_student 4 \
+    >scripts/eval_distillation.log 2>&1 &

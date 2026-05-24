@@ -4,6 +4,7 @@ import os
 os.environ["CUDA_VISIBLE_DEVICES"] = os.environ.get("CUDA_VISIBLE_DEVICES", "0")  # 保持已有设置
 os.environ["TF_FORCE_GPU_ALLOW_GROWTH"] = "true"   # TF 按需申请显存，而不是一次性占满
 # 或者更彻底：os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
+import math
 from pathlib import Path
 from dataclasses import dataclass
 from typing import Dict, Optional, Any
@@ -31,9 +32,19 @@ from prismatic.vla import get_vla_dataset_and_collator
 
 from conf.distillation import DistillationConfig
 from distillation.loaders import load_teacher, load_student, load_dataloader
-from distillation.runners import run_teacher_with_recording, run_student_ddim, get_cognition_features
+from distillation.runners import (
+    get_student_timesteps,
+    run_teacher_with_recording,
+    run_student_ddim_with_recording,
+)
 from distillation.loss import compute_loss
-from distillation.memory_log import log_memory
+from distillation.checkpoint import load_checkpoint, save_checkpoint
+from distillation.log import (
+    DistillationTrackers,
+    append_metrics_jsonl,
+    format_metric_line,
+    log_memory,
+)
 
 
 
@@ -45,6 +56,44 @@ overwatch = initialize_overwatch(__name__)
 def _sync_cuda() -> None:
     if torch.cuda.is_available():
         torch.cuda.synchronize()
+
+
+def _grad_norm(parameters) -> Optional[float]:
+    total_sq = 0.0
+    found_grad = False
+    for p in parameters:
+        if p.grad is None:
+            continue
+        found_grad = True
+        param_norm = p.grad.detach().data.norm(2)
+        total_sq += float(param_norm.item() ** 2)
+    if not found_grad:
+        return None
+    return total_sq ** 0.5
+
+
+def _scheduled_lr(step: int, total_steps: Optional[int], base_lr: float, min_lr: float, warmup_ratio: float) -> float:
+    if total_steps is None or total_steps <= 0:
+        return base_lr
+    warmup_steps = int(total_steps * warmup_ratio)
+    if warmup_steps > 0 and step <= warmup_steps:
+        return min_lr + (base_lr - min_lr) * (step / warmup_steps)
+    decay_steps = max(total_steps - warmup_steps, 1)
+    decay_progress = min(max((step - warmup_steps) / decay_steps, 0.0), 1.0)
+    cosine = 0.5 * (1.0 + math.cos(math.pi * decay_progress))
+    return min_lr + (base_lr - min_lr) * cosine
+
+
+def _set_optimizer_lr(optimizer: torch.optim.Optimizer, lr: float) -> None:
+    for group in optimizer.param_groups:
+        group["lr"] = lr
+
+
+def _checkpoint_name(prefix: str, suffix: str, step: Optional[int] = None) -> str:
+    suffix_part = f"_{suffix}" if suffix else ""
+    if step is None:
+        return f"{prefix}{suffix_part}.pt"
+    return f"{prefix}_{step:06d}{suffix_part}.pt"
 
 
 def train_distillation(cfg: DistillationConfig, hf_token: Optional[str] = None) -> None:
@@ -146,14 +195,40 @@ def train_distillation(cfg: DistillationConfig, hf_token: Optional[str] = None) 
         past_action_window_size=cfg.past_action_window_size,
     )
 
-    optimizer = torch.optim.AdamW(student.parameters(), lr=cfg.lr)
+    optimizer = torch.optim.AdamW(student.parameters(), lr=cfg.base_lr)
+    resume_state = load_checkpoint(cfg.resume_checkpoint, student, optimizer, map_location=device)
+    if resume_state["loaded"]:
+        overwatch.info(
+            "\n==========\n"
+            f"DISTILL CHECKPOINT LOADED | path={resume_state['path']} "
+            f"step={resume_state['step']} epoch={resume_state['epoch']}\n"
+            "=========="
+        )
 
     if cfg.log_memory:
         _sync_cuda()
         log_memory("before_train_loop", log_tf=cfg.log_memory_tf)
 
     # E. 训练
-    batch_count = 0
+    batch_count = int(resume_state["step"])
+    stop_training = False
+    metrics_path = cfg.output_dir / "metrics.jsonl"
+    if overwatch.is_rank_zero():
+        metrics_path.parent.mkdir(parents=True, exist_ok=True)
+        metrics_path.write_text("", encoding="utf-8")
+    run_id = cfg.run_id or cfg.output_dir.name
+    trackers = DistillationTrackers(
+        trackers=tuple(cfg.trackers),
+        run_id=run_id,
+        output_dir=cfg.output_dir,
+        hparams=draccus.encode(cfg),
+        wandb_project=cfg.wandb_project,
+        wandb_entity=cfg.wandb_entity,
+        swanlab_project=cfg.swanlab_project,
+        swanlab_workspace=cfg.swanlab_workspace,
+        swanlab_mode=cfg.swanlab_mode,
+        enabled=overwatch.is_rank_zero(),
+    )
     for epoch in range(cfg.epochs):
         for batch in dataloader:
             if cfg.max_batches is not None and batch_count >= cfg.max_batches:
@@ -162,7 +237,8 @@ def train_distillation(cfg: DistillationConfig, hf_token: Optional[str] = None) 
                     f"DISTILL STOP | reached max_batches={cfg.max_batches}\n"
                     "=========="
                 )
-                return  # 提前停下，以供debug
+                stop_training = True
+                break  # 提前停下，以供debug，但仍走统一保存 checkpoint
             batch_count += 1
             first_step = batch_count == 1
 
@@ -180,22 +256,23 @@ def train_distillation(cfg: DistillationConfig, hf_token: Optional[str] = None) 
             B = batch["actions"].shape[0]
             T = cfg.future_action_window_size + 1
             C = cfg.action_dim
-            noise = torch.randn(B, T, C, device=device)
-
-            # 2. 教师轨迹（带记录）
-            if cfg.log_memory and first_step:
-                overwatch.info(
-                    f"[distill_debug] step={batch_count} rank={overwatch.rank()} "
-                    f"before_run_teacher_with_recording "
-                    f"input_ids={tuple(batch['input_ids'].shape)} "
-                    f"attention_mask={tuple(batch['attention_mask'].shape)} "
-                    f"actions={tuple(batch['actions'].shape)} "
-                    f"noise={tuple(noise.shape)}"
+            actions_future = batch["actions"][:, -T:, :]
+            expected_actions_shape = (B, T, C)
+            if tuple(actions_future.shape) != expected_actions_shape:
+                raise RuntimeError(
+                    "actions_future shape mismatch: "
+                    f"got={tuple(actions_future.shape)}, expected={expected_actions_shape}"
                 )
+            noise = torch.randn(B, T, C, device=device)
+            student_timesteps = get_student_timesteps(student, cfg.num_ddim_steps_student)
+
+            # 2. Teacher DDIM. Current loss only uses x0_teacher and z_corr.
+    
             with torch.no_grad():
                 teacher_results = run_teacher_with_recording(
                     teacher, batch, noise,
                     num_steps=cfg.num_ddim_steps_teacher,
+                    record_timesteps=student_timesteps,
                     cfg_scale=cfg.cfg_scale_teacher,
                     device=device,
                 )
@@ -208,7 +285,8 @@ def train_distillation(cfg: DistillationConfig, hf_token: Optional[str] = None) 
                 overwatch.info(
                     f"[distill_debug] step={batch_count} rank={overwatch.rank()} "
                     f"after_run_teacher_with_recording "
-                    f"z_corr={z_corr_shape}"
+                    f"z_corr={z_corr_shape} "
+                    f"x0_teacher={tuple(teacher_results['x0_teacher'].shape)}"
                 )
 
             if cfg.log_memory and first_step:
@@ -217,67 +295,166 @@ def train_distillation(cfg: DistillationConfig, hf_token: Optional[str] = None) 
 
             # 3. 学生：用教师输出的 z_corr 做 DDIM 采样
             z_corr = teacher_results["z_corr"]
-            x0_student_corr = run_student_ddim(
+            x0_teacher = teacher_results["x0_teacher"]
+            student_results = run_student_ddim_with_recording(
                 student, noise, z_corr, cfg.num_ddim_steps_student, device
             )
+            x0_student = student_results["x0_student"]
+            if first_step:
+                overwatch.info(
+                    f"=================================================================="
+                    f"teacher_full_timesteps={teacher_results['teacher_full_timesteps']} "
+                    f"student_timesteps={student_timesteps} "
+                    f"teacher_recorded_timesteps={teacher_results['timesteps']} "
+                    f"student_recorded_timesteps={student_results['timesteps']} "
+                    f"teacher_trajectory.shape={list(teacher_results['trajectory'].shape)} "
+                    f"student_trajectory.shape={list(student_results['trajectory'].shape)}"
+                )
+            if x0_teacher.shape != x0_student.shape or x0_student.shape != actions_future.shape:
+                raise RuntimeError(
+                    "distillation output shape mismatch: "
+                    f"actions_future={tuple(actions_future.shape)}, "
+                    f"z_corr={tuple(z_corr.shape)}, "
+                    f"x0_teacher={tuple(x0_teacher.shape)}, "
+                    f"x0_student={tuple(x0_student.shape)}"
+                )
 
             if cfg.log_memory and first_step:
                 _sync_cuda()
                 log_memory("train_step1_after_student_ddim_corr", log_tf=cfg.log_memory_tf)
 
-            # 4. 学生(z_wrong)，若做指令约束
-            x0_student_wrong = None
-            if cfg.use_instruction_constraint and B > 1:
-                shuffle_idx = torch.randperm(B, device=device)
-                batch_wrong = dict(batch)
-                batch_wrong["input_ids"] = batch["input_ids"][shuffle_idx]
-                batch_wrong["attention_mask"] = batch["attention_mask"][shuffle_idx]
-                if cfg.log_memory and first_step:
-                    overwatch.info(
-                        f"[distill_debug] step={batch_count} rank={overwatch.rank()} "
-                        f"before_get_cognition_features_wrong "
-                        f"shuffle_idx={tuple(shuffle_idx.shape)} "
-                        f"wrong_input_ids={tuple(batch_wrong['input_ids'].shape)} "
-                        f"wrong_attention_mask={tuple(batch_wrong['attention_mask'].shape)}"
-                    )
-                with torch.no_grad():
-                    z_wrong = get_cognition_features(teacher, batch_wrong, device)
-                if cfg.log_memory and first_step:
-                    overwatch.info(
-                        f"[distill_debug] step={batch_count} rank={overwatch.rank()} "
-                        f"after_get_cognition_features_wrong "
-                        f"z_wrong={tuple(z_wrong.shape)}"
-                    )
-                x0_student_wrong = run_student_ddim(
-                    student, noise, z_wrong, cfg.num_ddim_steps_student, device
-                )
-
-            if cfg.log_memory and first_step:
-                _sync_cuda()
-                log_memory("train_step1_after_student_ddim_wrong_if_any", log_tf=cfg.log_memory_tf)
-
             # 5. Loss + backward
             loss_dict = compute_loss(
-                teacher_results, x0_student_corr, x0_student_wrong, student, batch, cfg
+                student=student,
+                actions_future=actions_future,
+                z_corr=z_corr,
+                x0_teacher=x0_teacher,
+                x0_student=x0_student,
+                teacher_trajectory=teacher_results["trajectory"],
+                student_trajectory=student_results["trajectory"],
+                cfg=cfg,
             )
+            for loss_name, loss_value in loss_dict.items():
+                if not torch.isfinite(loss_value):
+                    raise RuntimeError(
+                        f"non-finite distillation loss: {loss_name}={loss_value.item()} "
+                        f"at step={batch_count}"
+                    )
             if cfg.log_memory and first_step:
                 _sync_cuda()
                 log_memory("train_step1_before_backward", log_tf=cfg.log_memory_tf)
+            lr = _scheduled_lr(
+                batch_count,
+                cfg.max_batches,
+                cfg.base_lr,
+                cfg.min_lr,
+                cfg.warmup_ratio,
+            )
+            _set_optimizer_lr(optimizer, lr)
             optimizer.zero_grad()
             loss_dict["total"].backward()
+            grad_norm = float(torch.nn.utils.clip_grad_norm_(student.parameters(), cfg.max_grad_norm).item())
+            was_clipped = grad_norm > cfg.max_grad_norm
             optimizer.step()
-            overwatch.info(
-                "\n==========\n"
-                "DISTILL STEP DONE\n"
-                f"epoch={epoch + 1}/{cfg.epochs} step={batch_count} "
-                f"loss={loss_dict['total'].item():.6f}\n"
-                "=========="
+            loss_total = float(loss_dict["total"].item())
+            loss_task = float(loss_dict["task"].item())
+            loss_final = float(loss_dict["final"].item())
+            loss_traj = float(loss_dict["traj"].item())
+            metrics = {
+                "step": batch_count,
+                "epoch": epoch + 1,
+                "loss_total": loss_total,
+                "loss_task": loss_task,
+                "loss_final": loss_final,
+                "loss_traj": loss_traj,
+                "lambda_task": cfg.lambda_task,
+                "lambda_final": cfg.lambda_final,
+                "lambda_traj": cfg.lambda_traj,
+                "lambda_neg": cfg.lambda_neg,
+                "grad_norm": grad_norm,
+                "max_grad_norm": cfg.max_grad_norm,
+                "was_clipped": was_clipped,
+                "lr": lr,
+                "actions_shape": list(actions_future.shape),
+                "z_corr_shape": list(z_corr.shape),
+                "x0_teacher_shape": list(x0_teacher.shape),
+                "x0_student_shape": list(x0_student.shape),
+                "student_trajectory_shape": list(student_results["trajectory"].shape),
+                "student_timesteps": student_results["timesteps"],
+                "teacher_trajectory_shape": list(teacher_results["trajectory"].shape),
+                "teacher_timesteps": teacher_results["timesteps"],
+                "teacher_full_timesteps": teacher_results["teacher_full_timesteps"],
+            }
+            if overwatch.is_rank_zero():
+                append_metrics_jsonl(metrics_path, metrics)
+                trackers.log(
+                    {
+                        "epoch": epoch + 1,
+                        "loss/total": loss_total,
+                        "loss/task": loss_task,
+                        "loss/final": loss_final,
+                        "loss/traj": loss_traj,
+                        "lambda/task": cfg.lambda_task,
+                        "lambda/final": cfg.lambda_final,
+                        "lambda/traj": cfg.lambda_traj,
+                        "lambda/neg": cfg.lambda_neg,
+                        "grad_norm": grad_norm,
+                        "max_grad_norm": cfg.max_grad_norm,
+                        "was_clipped": float(was_clipped),
+                        "lr": lr,
+                    },
+                    step=batch_count,
+                )
+            metric_line = format_metric_line(
+                step=batch_count,
+                epoch=epoch + 1,
+                epochs=cfg.epochs,
+                loss_total=loss_total,
+                loss_task=loss_task,
+                loss_final=loss_final,
+                grad_norm=grad_norm,
+                lr=lr,
             )
+            if overwatch.is_rank_zero() and (batch_count == 1 or batch_count % 10 == 0):
+                print(metric_line, flush=True)
+            if cfg.checkpoint_interval > 0 and batch_count % cfg.checkpoint_interval == 0:
+                step_checkpoint_path = cfg.output_dir / _checkpoint_name(
+                    "checkpoint_step",
+                    cfg.checkpoint_suffix,
+                    step=batch_count,
+                )
+                save_checkpoint(
+                    step_checkpoint_path,
+                    student=student,
+                    optimizer=optimizer,
+                    epoch=epoch,
+                    step=batch_count,
+                    cfg=cfg,
+                )
+                overwatch.info(f"DISTILL CHECKPOINT SAVED | path={step_checkpoint_path}")
 
             if cfg.log_memory and first_step:
                 _sync_cuda()
                 log_memory("train_step1_after_optimizer_step", log_tf=cfg.log_memory_tf)
+        if stop_training:
+            break
 
     # 6. 保存学生
     cfg.output_dir.mkdir(parents=True, exist_ok=True)
-    torch.save(student.state_dict(), cfg.output_dir / "student_final.pt")
+    student_path = cfg.output_dir / _checkpoint_name("student_final", cfg.checkpoint_suffix)
+    final_checkpoint_path = cfg.output_dir / _checkpoint_name("checkpoint_final", cfg.checkpoint_suffix)
+    torch.save(student.state_dict(), student_path)
+    save_checkpoint(
+        final_checkpoint_path,
+        student=student,
+        optimizer=optimizer,
+        epoch=epoch,
+        step=batch_count,
+        cfg=cfg,
+    )
+    overwatch.info(
+        "\n==========\n"
+        f"DISTILL CHECKPOINT SAVED | student_path={student_path} checkpoint_path={final_checkpoint_path}\n"
+        "=========="
+    )
+    trackers.finalize()
