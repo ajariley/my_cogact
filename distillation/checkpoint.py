@@ -5,6 +5,38 @@ from typing import Any, Dict, Optional
 import torch
 
 
+def student_state_dict(student: torch.nn.Module) -> Dict[str, Any]:
+    state = student.state_dict()
+    normalized = {}
+    for key, value in state.items():
+        if key.startswith("net.module."):
+            normalized["net." + key[len("net.module."):]] = value
+        elif key.startswith("module."):
+            normalized[key[len("module."):]] = value
+        else:
+            normalized[key] = value
+    return normalized
+
+
+def _state_dict_for_student(student: torch.nn.Module, state: Dict[str, Any]) -> Dict[str, Any]:
+    student_keys = set(student.state_dict().keys())
+    if any(key.startswith("net.module.") for key in student_keys):
+        return {
+            "net.module." + key[len("net."):] if key.startswith("net.") else key: value
+            for key, value in state.items()
+        }
+    if any(key.startswith("module.") for key in student_keys):
+        return {
+            "module." + key if not key.startswith("module.") else key: value
+            for key, value in state.items()
+        }
+    return {
+        "net." + key[len("net.module."):] if key.startswith("net.module.") else
+        key[len("module."):] if key.startswith("module.") else key: value
+        for key, value in state.items()
+    }
+
+
 def _to_checkpoint_config(cfg: Any) -> Dict[str, Any]:
     if is_dataclass(cfg):
         raw = asdict(cfg)
@@ -26,7 +58,7 @@ def save_checkpoint(
     path.parent.mkdir(parents=True, exist_ok=True)
     torch.save(
         {
-            "student": student.state_dict(),
+            "student": student_state_dict(student),
             "optimizer": optimizer.state_dict(),
             "epoch": epoch,
             "step": step,
@@ -46,7 +78,7 @@ def load_checkpoint(
         return {"epoch": 0, "step": 0, "loaded": False}
 
     checkpoint = torch.load(path, map_location=map_location, weights_only=True)
-    student.load_state_dict(checkpoint["student"])
+    student.load_state_dict(_state_dict_for_student(student, checkpoint["student"]))
     if optimizer is not None and "optimizer" in checkpoint:
         optimizer.load_state_dict(checkpoint["optimizer"])
 

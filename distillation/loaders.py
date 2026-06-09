@@ -5,12 +5,31 @@ from dataclasses import dataclass
 from typing import Dict, Optional, Any
 
 import torch
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, IterableDataset
+from torch.utils.data.distributed import DistributedSampler
+import torch.distributed as dist
 import draccus
 
 from vla import load_vla, CogACT
 from action_model.action_model import ActionModel
 from prismatic.vla import get_vla_dataset_and_collator
+
+
+class ShardedIterableDataset(IterableDataset):
+    def __init__(self, dataset: IterableDataset, rank: int, world_size: int) -> None:
+        self.dataset = dataset
+        self.rank = rank
+        self.world_size = world_size
+
+    def __iter__(self):
+        for idx, sample in enumerate(self.dataset):
+            if idx % self.world_size == self.rank:
+                yield sample
+
+    def __len__(self) -> int:
+        if hasattr(self.dataset, "__len__"):
+            return len(self.dataset) // self.world_size
+        raise TypeError("ShardedIterableDataset length is unknown because the wrapped dataset has no __len__")
 
 
 def load_teacher(
@@ -90,9 +109,38 @@ def load_dataloader(
             "shuffle_buffer_size", "image_aug", "load_all_data_for_training",
         )},
     )
+    sampler = None
+    if dist.is_available() and dist.is_initialized() and dist.get_world_size() > 1:
+        if isinstance(vla_dataset, IterableDataset):
+            vla_dataset = ShardedIterableDataset(
+                vla_dataset,
+                rank=dist.get_rank(),
+                world_size=dist.get_world_size(),
+            )
+            print(
+                f"[distillation] IterableDataset sharded by rank: "
+                f"rank={dist.get_rank()} world_size={dist.get_world_size()}",
+                flush=True,
+            )
+        elif hasattr(vla_dataset, "__len__"):
+            sampler = DistributedSampler(
+                vla_dataset,
+                num_replicas=dist.get_world_size(),
+                rank=dist.get_rank(),
+                shuffle=True,
+                drop_last=False,
+            )
+        else:
+            print(
+                "[distillation] WARNING: dataset does not expose __len__; DistributedSampler cannot be used. "
+                "Ensure the dataset pipeline shards by rank, otherwise ranks may see duplicate data.",
+                flush=True,
+            )
+
     dataloader = DataLoader(
         vla_dataset,
         batch_size=batch_size,
+        sampler=sampler,
         collate_fn=collator,
         num_workers=0,
     )

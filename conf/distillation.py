@@ -45,11 +45,12 @@ class DistillationConfig:
     use_cpu_offload: bool = False  # True 时部分权重留 CPU，易与手写 .to(cuda) 的 batch 设备不一致
     use_bf16: bool = True
     reduce_in_full_precision: bool = True
+    use_student_ddp: bool = True
     train_strategy: str = "fsdp"
     # Loss 权重
     lambda_task: float = 0.3
     lambda_final: float = 1.0
-    lambda_traj: float = 0.5
+    lambda_traj: float = 0.2
     lambda_neg: float = 0.1
     use_instruction_constraint: bool = True  # 指令敏感：同图+错误指令→z_wrong，L_neg 拉大学生(corr)与(wrong)距离
     log_memory: bool = False

@@ -11,6 +11,7 @@ from typing import Dict, Optional, Any
 
 import torch
 from torch.utils.data import DataLoader
+from torch.nn.parallel import DistributedDataParallel as DDP
 import draccus
 from torch.cuda.amp import autocast
 
@@ -38,7 +39,8 @@ from distillation.runners import (
     run_student_ddim_with_recording,
 )
 from distillation.loss import compute_loss
-from distillation.checkpoint import load_checkpoint, save_checkpoint
+from distillation.checkpoint import load_checkpoint, save_checkpoint, student_state_dict
+from distillation.distributed_utils import get_dist_info
 from distillation.log import (
     DistillationTrackers,
     append_metrics_jsonl,
@@ -103,6 +105,7 @@ def train_distillation(cfg: DistillationConfig, hf_token: Optional[str] = None) 
     与原版 scripts/train.py 的显存管理顺序对齐。
     """
     device: torch.device
+    dist_info = get_dist_info()
 
     # Support both --teacher_checkpoint and --pretrained_checkpoint CLI flags.
     checkpoint_input = cfg.pretrained_checkpoint or cfg.teacher_checkpoint
@@ -163,7 +166,7 @@ def train_distillation(cfg: DistillationConfig, hf_token: Optional[str] = None) 
         if cfg.log_memory:
             log_memory("after_teacher_on_device", log_tf=cfg.log_memory_tf)
     else:
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        device = dist_info.device
         if cfg.use_bf16:
             teacher.vlm = teacher.vlm.to(torch.bfloat16)
         teacher = teacher.to(device)
@@ -195,6 +198,19 @@ def train_distillation(cfg: DistillationConfig, hf_token: Optional[str] = None) 
         past_action_window_size=cfg.past_action_window_size,
     )
 
+    if cfg.use_student_ddp and dist_info.world_size > 1:
+        student.net = DDP(
+            student.net,
+            device_ids=[dist_info.local_rank],
+            output_device=dist_info.local_rank,
+            find_unused_parameters=False,
+            broadcast_buffers=False,
+        )
+        overwatch.info(
+            f"Student action net wrapped with DDP | rank={dist_info.rank} "
+            f"local_rank={dist_info.local_rank} world_size={dist_info.world_size}"
+        )
+
     optimizer = torch.optim.AdamW(student.parameters(), lr=cfg.base_lr)
     resume_state = load_checkpoint(cfg.resume_checkpoint, student, optimizer, map_location=device)
     if resume_state["loaded"]:
@@ -208,6 +224,13 @@ def train_distillation(cfg: DistillationConfig, hf_token: Optional[str] = None) 
     if cfg.log_memory:
         _sync_cuda()
         log_memory("before_train_loop", log_tf=cfg.log_memory_tf)
+
+    global_batch_size = cfg.batch_size * dist_info.world_size
+    overwatch.info(
+        f"DISTILL BATCH CONFIG | per_device_batch_size={cfg.batch_size} "
+        f"world_size={dist_info.world_size} global_batch_size={global_batch_size} "
+        f"use_student_ddp={cfg.use_student_ddp and dist_info.world_size > 1}"
+    )
 
     # E. 训练
     batch_count = int(resume_state["step"])
@@ -230,6 +253,9 @@ def train_distillation(cfg: DistillationConfig, hf_token: Optional[str] = None) 
         enabled=overwatch.is_rank_zero(),
     )
     for epoch in range(cfg.epochs):
+        sampler = getattr(dataloader, "sampler", None)
+        if hasattr(sampler, "set_epoch"):
+            sampler.set_epoch(epoch)
         for batch in dataloader:
             if cfg.max_batches is not None and batch_count >= cfg.max_batches:
                 overwatch.info(
@@ -443,7 +469,7 @@ def train_distillation(cfg: DistillationConfig, hf_token: Optional[str] = None) 
     cfg.output_dir.mkdir(parents=True, exist_ok=True)
     student_path = cfg.output_dir / _checkpoint_name("student_final", cfg.checkpoint_suffix)
     final_checkpoint_path = cfg.output_dir / _checkpoint_name("checkpoint_final", cfg.checkpoint_suffix)
-    torch.save(student.state_dict(), student_path)
+    torch.save(student_state_dict(student), student_path)
     save_checkpoint(
         final_checkpoint_path,
         student=student,

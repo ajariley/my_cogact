@@ -212,6 +212,7 @@ class CogACT(nn.Module):
         past_action_window_size: int = 0,
         action_model_type: str = 'DiT-B',
         use_ema: bool = False,
+        load_action_model_from_checkpoint: bool = True,
         norm_stats = None,
         **kwargs,
     ) -> CogACT:
@@ -254,7 +255,7 @@ class CogACT(nn.Module):
                         )
 
         # Load ActionModel from Checkpoint
-        if "action_model" in model_state_dict:
+        if load_action_model_from_checkpoint and "action_model" in model_state_dict:
             try:
                 # Handle positional_embedding shape mismatch
                 checkpoint_state_dict = model_state_dict["action_model"].copy()
@@ -308,8 +309,10 @@ class CogACT(nn.Module):
                     cogact.ema_diffusion.load_state_dict(ema_checkpoint_state_dict, strict=False)
                 except RuntimeError as e:
                     overwatch.warning(f"Error loading EMA Diffusion from ActionModel: {e}. Skipping EMA.")
-        else:
+        elif "action_model" not in model_state_dict:
             overwatch.warning("No ActionModel found in the pretrained checkpoint. Initializing a new one.")
+        else:
+            overwatch.info("Skipping ActionModel from pretrained checkpoint; expecting an external action model checkpoint.")
         return cogact        
 
     @torch.inference_mode()

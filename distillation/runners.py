@@ -221,7 +221,7 @@ def run_student_ddim_with_recording(
     if student.ddim_diffusion is None or student.ddim_diffusion.num_timesteps != num_steps:
         student.create_ddim(ddim_step=num_steps)
     model_kwargs = dict(z=z)
-    sample_fn = student.net.forward
+    sample_fn = student.net
 
     trajectory = []
     for out in student.ddim_diffusion.ddim_sample_loop_progressive(
