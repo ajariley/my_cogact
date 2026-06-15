@@ -82,16 +82,19 @@ CUDA_VISIBLE_DEVICES=2 nohup  torchrun --standalone --nnodes 1 --nproc-per-node 
   --vla.train_strategy fsdp-full-shard \
   --max_batch 1 >scripts/distillation.log 2>&1 &
 
-2026.4.23 最新
-# FSDP 模式（需 torchrun）
+2026.6.12 最新 train
+# 
 
  PYTHONPATH=. \
- CUDA_VISIBLE_DEVICES=1 \
+ CUDA_VISIBLE_DEVICES=0,1 \
+ CUDA_LAUNCH_BLOCKING=1 \
+ TORCH_NCCL_BLOCKING_WAIT=1 \
+ NCCL_DEBUG=INFO \
   HF_HOME=/home/huangjiaqi/.cache/huggingface \
   HF_HUB_OFFLINE=1 \
   nohup proxy_up torchrun --standalone --nnodes 1 \
-  --nproc-per-node 1 scripts/distillation_cogact.py \
-  --use_fsdp False --use_cpu_offload False --use_bf16 True --reduce_in_full_precision True \
+  --nproc-per-node 2 scripts/distillation_cogact.py \
+  --use_fsdp False --use_cpu_offload False --use_bf16 True --reduce_in_full_precision True  --use_student_ddp True \
   --data_root_dir "/home/huangjiaqi/.vscode-server/openvla_data" \
   --pretrained_checkpoint "/home/huangjiaqi/projects/CogACT-Base" \
   --checkpoint_suffix "1" \

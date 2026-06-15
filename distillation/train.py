@@ -203,7 +203,7 @@ def train_distillation(cfg: DistillationConfig, hf_token: Optional[str] = None) 
             student.net,
             device_ids=[dist_info.local_rank],
             output_device=dist_info.local_rank,
-            find_unused_parameters=False,
+            find_unused_parameters=True, # TODO 先从False改成True
             broadcast_buffers=False,
         )
         overwatch.info(
