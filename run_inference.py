@@ -8,15 +8,13 @@ from PIL import Image
 from vla import load_vla
 import torch
 
-# 获取 Hugging Face token（从环境变量或直接设置）
-# hf_token = os.environ.get('HF_TOKEN', None)
-# 如果没有设置环境变量，可以在这里直接设置（不推荐）
-hf_token = "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"
+# 获取 Hugging Face token
+hf_token = os.environ.get("HF_TOKEN")
 
 # 加载模型
 print("正在加载模型...")
 model = load_vla(
-    '/home/huangjiaqi/projects/CogACT-Base/checkpoints/CogACT-Base.pt',  # 使用本地下载的模型路径
+    '/data/huangjiaqi/projects/CogACT-Base/checkpoints/CogACT-Base.pt',  # 使用本地下载的模型路径
     hf_token=hf_token,  # 传入 Hugging Face token
     load_for_training=False, 
     action_model_type='DiT-B',              # 选择 ['DiT-S', 'DiT-B', 'DiT-L'] 以匹配模型权重
@@ -30,7 +28,7 @@ model.to('cuda:0').eval()
 print("模型加载完成！")
 
 # 准备输入
-image_path = "/home/huangjiaqi/openvla_pic/banana1.jpg"  # 你的图片路径
+image_path = "/data/huangjiaqi/openvla_pic/banana1.jpg"  # 你的图片路径
 image = Image.open(image_path)
 prompt = "move sponge near apple"  # 输入你的任务描述（根据图片内容修改）
 
@@ -48,4 +46,3 @@ actions, _ = model.predict_action(
 # 结果：16 步的 7-DoF 动作，形状为 [16, 7]
 print(f"预测完成！动作形状: {actions.shape}")
 print(f"动作序列:\n{actions}")
-

@@ -39,7 +39,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--teacher-checkpoint",
         type=Path,
-        default=Path("/home/huangjiaqi/projects/CogACT-Base/checkpoints/CogACT-Base.pt"),
+        default=Path("/data/huangjiaqi/projects/CogACT-Base/checkpoints/CogACT-Base.pt"),
         help="Teacher checkpoint path used by load_teacher.",
     )
     parser.add_argument(

@@ -47,6 +47,7 @@ from distillation.log import (
     format_metric_line,
     log_memory,
 )
+from distillation.train_utils import TrainController, run_train_eval
 
 
 
@@ -252,6 +253,15 @@ def train_distillation(cfg: DistillationConfig, hf_token: Optional[str] = None) 
         swanlab_mode=cfg.swanlab_mode,
         enabled=overwatch.is_rank_zero(),
     )
+    controller = TrainController(
+        eval_interval=cfg.train_eval_interval,
+        patience=cfg.early_stop_patience,
+        min_delta=cfg.early_stop_min_delta,
+        metric_name=cfg.early_stop_metric,
+        output_dir=cfg.output_dir,
+        checkpoint_suffix=cfg.checkpoint_suffix,
+        enabled=cfg.enable_train_eval,
+    )
     for epoch in range(cfg.epochs):
         sampler = getattr(dataloader, "sampler", None)
         if hasattr(sampler, "set_epoch"):
@@ -441,9 +451,12 @@ def train_distillation(cfg: DistillationConfig, hf_token: Optional[str] = None) 
                 grad_norm=grad_norm,
                 lr=lr,
             )
-            if overwatch.is_rank_zero() and (batch_count == 1 or batch_count % 10 == 0):
+            if overwatch.is_rank_zero() and (batch_count == 1 or batch_count % 20 == 0):
                 print(metric_line, flush=True)
-            if cfg.checkpoint_interval > 0 and batch_count % cfg.checkpoint_interval == 0:
+            should_checkpoint = cfg.checkpoint_interval > 0 and batch_count % cfg.checkpoint_interval == 0
+            should_eval = controller.should_eval(batch_count)
+            step_checkpoint_path = None
+            if should_checkpoint or should_eval:
                 step_checkpoint_path = cfg.output_dir / _checkpoint_name(
                     "checkpoint_step",
                     cfg.checkpoint_suffix,
@@ -459,6 +472,68 @@ def train_distillation(cfg: DistillationConfig, hf_token: Optional[str] = None) 
                 )
                 overwatch.info(f"DISTILL CHECKPOINT SAVED | path={step_checkpoint_path}")
 
+            if should_eval and step_checkpoint_path is not None:
+                if dist.is_available() and dist.is_initialized():
+                    dist.barrier()
+                eval_summary = run_train_eval(
+                    teacher=teacher,
+                    student=student,
+                    cfg=cfg,
+                    device=device,
+                    max_eval_batches=cfg.train_eval_batches,
+                )
+                stop_value = 0
+                if overwatch.is_rank_zero():
+                    eval_summary = {
+                        **eval_summary,
+                        "step": batch_count,
+                        "checkpoint": str(step_checkpoint_path),
+                    }
+                    append_metrics_jsonl(metrics_path, eval_summary)
+                    trackers.log(
+                        {
+                            "eval/mean_loss_final": eval_summary["eval/mean_loss_final"],
+                            "eval/mean_loss_traj": eval_summary["eval/mean_loss_traj"],
+                            "eval/mean_student_teacher_final_mse": eval_summary[
+                                "eval/mean_student_teacher_final_mse"
+                            ],
+                            "eval/mean_student_gt_action_mse": eval_summary[
+                                "eval/mean_student_gt_action_mse"
+                            ],
+                            "eval/mean_teacher_gt_action_mse": eval_summary[
+                                "eval/mean_teacher_gt_action_mse"
+                            ],
+                        },
+                        step=batch_count,
+                    )
+                    stop_value = int(
+                        controller.update(
+                            step=batch_count,
+                            checkpoint_path=step_checkpoint_path,
+                            eval_summary=eval_summary,
+                        )
+                    )
+                    overwatch.info(
+                        "DISTILL TRAIN EVAL | "
+                        f"step={batch_count} "
+                        f"{cfg.early_stop_metric}={eval_summary[cfg.early_stop_metric]:.6f} "
+                        f"best={controller.best_metric:.6f} "
+                        f"bad_eval_count={controller.bad_eval_count}/{controller.patience} "
+                        f"best_checkpoint={controller.best_checkpoint_path}"
+                    )
+                if dist.is_available() and dist.is_initialized():
+                    stop_tensor = torch.tensor([stop_value], device=device, dtype=torch.int64)
+                    dist.broadcast(stop_tensor, src=0)
+                    stop_value = int(stop_tensor.item())
+                if stop_value:
+                    overwatch.info(
+                        "\n==========\n"
+                        f"DISTILL STOP | early stopping at step={batch_count}\n"
+                        "=========="
+                    )
+                    stop_training = True
+                    break
+
             if cfg.log_memory and first_step:
                 _sync_cuda()
                 log_memory("train_step1_after_optimizer_step", log_tf=cfg.log_memory_tf)
@@ -469,18 +544,33 @@ def train_distillation(cfg: DistillationConfig, hf_token: Optional[str] = None) 
     cfg.output_dir.mkdir(parents=True, exist_ok=True)
     student_path = cfg.output_dir / _checkpoint_name("student_final", cfg.checkpoint_suffix)
     final_checkpoint_path = cfg.output_dir / _checkpoint_name("checkpoint_final", cfg.checkpoint_suffix)
-    torch.save(student_state_dict(student), student_path)
-    save_checkpoint(
-        final_checkpoint_path,
-        student=student,
-        optimizer=optimizer,
-        epoch=epoch,
-        step=batch_count,
-        cfg=cfg,
-    )
+    final_source = None
+    if dist.is_available() and dist.is_initialized():
+        dist.barrier()
+    if overwatch.is_rank_zero():
+        if cfg.enable_train_eval and controller.best_checkpoint_alias().exists():
+            best_checkpoint = torch.load(
+                controller.best_checkpoint_alias(),
+                map_location="cpu",
+                weights_only=True,
+            )
+            torch.save(best_checkpoint["student"], student_path)
+            torch.save(best_checkpoint, final_checkpoint_path)
+            final_source = controller.best_checkpoint_alias()
+        else:
+            torch.save(student_state_dict(student), student_path)
+            save_checkpoint(
+                final_checkpoint_path,
+                student=student,
+                optimizer=optimizer,
+                epoch=epoch,
+                step=batch_count,
+                cfg=cfg,
+            )
     overwatch.info(
         "\n==========\n"
-        f"DISTILL CHECKPOINT SAVED | student_path={student_path} checkpoint_path={final_checkpoint_path}\n"
+        f"DISTILL CHECKPOINT SAVED | student_path={student_path} checkpoint_path={final_checkpoint_path} "
+        f"source={final_source or 'last'}\n"
         "=========="
     )
     trackers.finalize()

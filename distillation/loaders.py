@@ -107,10 +107,17 @@ def load_dataloader(
         **{k: v for k, v in kwargs.items() if k not in (
             "future_action_window_size", "past_action_window_size",
             "shuffle_buffer_size", "image_aug", "load_all_data_for_training",
+            "disable_distributed_shard",
         )},
     )
     sampler = None
-    if dist.is_available() and dist.is_initialized() and dist.get_world_size() > 1:
+    disable_distributed_shard = kwargs.get("disable_distributed_shard", False)
+    if (
+        not disable_distributed_shard
+        and dist.is_available()
+        and dist.is_initialized()
+        and dist.get_world_size() > 1
+    ):
         if isinstance(vla_dataset, IterableDataset):
             vla_dataset = ShardedIterableDataset(
                 vla_dataset,

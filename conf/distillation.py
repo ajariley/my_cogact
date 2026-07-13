@@ -16,12 +16,12 @@ from prismatic.vla import get_vla_dataset_and_collator
 @dataclass
 class DistillationConfig:
     pretrained_checkpoint: Optional[Path] = None
-    teacher_checkpoint: Path = Path("/home/huangjiaqi/projects/CogACT-Base/checkpoints/CogACT-Base.pt")
+    teacher_checkpoint: Path = Path("/data/huangjiaqi/projects/CogACT-Base/checkpoints/CogACT-Base.pt")
     data_root_dir: Path = Path("datasets/open-x-embodiment")
     data_mix: str = "bridge"
     output_dir: Path = Path("runs/distillation")
     resume_checkpoint: Optional[Path] = None
-    checkpoint_interval: int = 100
+    checkpoint_interval: int = 1000
     checkpoint_suffix: str = ""
     metric_header_interval: int = 20
     batch_size: int = 1
@@ -57,6 +57,12 @@ class DistillationConfig:
     log_memory_tf: bool = True
     eval_seed: int = 42
     eval_cache_path: Optional[Path] = None
+    enable_train_eval: bool = False
+    train_eval_interval: int = 1000  #每训练 1000 个 step 才做一次 eval
+    train_eval_batches: int = 200
+    early_stop_patience: int = 6
+    early_stop_min_delta: float = 0
+    early_stop_metric: str = "eval/mean_student_teacher_final_mse"
 
     # Experiment tracking. JSONL is always written locally; add "wandb" or "swanlab" for dashboards.
     trackers: Tuple[str, ...] = ("jsonl",)
