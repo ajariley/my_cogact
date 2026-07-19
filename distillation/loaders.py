@@ -64,10 +64,10 @@ def load_student(
     future_action_window_size: int,
     past_action_window_size: int,
     device: torch.device,
+    initial_state_dict: Optional[Dict[str, torch.Tensor]] = None,
 ) -> ActionModel:
     """
-    创建学生 ActionModel（如 DiT-S）。
-    调用：ActionModel(token_size=..., model_type=..., ...)
+    创建学生 ActionModel，并使用教师 action model 参数初始化。
     """
     student = ActionModel(
         token_size=token_size,
@@ -76,6 +76,8 @@ def load_student(
         future_action_window_size=future_action_window_size,
         past_action_window_size=past_action_window_size,
     )
+    if initial_state_dict is not None:
+        student.load_state_dict(initial_state_dict, strict=True)
     student.create_ddim(ddim_step=4)  # 示例：4 步
     student = student.to(device)
     return student

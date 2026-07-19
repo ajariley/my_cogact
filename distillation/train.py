@@ -145,6 +145,10 @@ def train_distillation(cfg: DistillationConfig, hf_token: Optional[str] = None) 
             cfg.future_action_window_size,
             hf_token=hf_token,
         )
+    teacher_action_state = {
+        name: tensor.detach().cpu().clone()
+        for name, tensor in teacher.action_model.state_dict().items()
+    }
     if cfg.log_memory:
         log_memory("after_load_teacher", log_tf=cfg.log_memory_tf)
     teacher = teacher.cpu()
@@ -183,7 +187,9 @@ def train_distillation(cfg: DistillationConfig, hf_token: Optional[str] = None) 
         future_action_window_size=cfg.future_action_window_size,
         past_action_window_size=cfg.past_action_window_size,
         device=device,
+        initial_state_dict=teacher_action_state,
     )
+    del teacher_action_state
     if cfg.log_memory:
         log_memory("after_load_student", log_tf=cfg.log_memory_tf)
 

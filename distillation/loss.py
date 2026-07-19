@@ -44,7 +44,7 @@ def compute_loss(
         student_trajectory,
         teacher_trajectory.detach(),
     )
-    loss_total = loss_task + cfg.lambda_final * loss_final + cfg.lambda_traj * loss_traj
+    loss_total = cfg.lambda_task * loss_task + cfg.lambda_final * loss_final + cfg.lambda_traj * loss_traj
     return {
         "total": loss_total,
         "task": loss_task,

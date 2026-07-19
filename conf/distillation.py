@@ -28,14 +28,14 @@ class DistillationConfig:
     max_batches: Optional[int] = None
     epochs: int = 10
     lr: float = 1e-4  # Deprecated alias; distillation uses base_lr for the optimizer schedule.
-    base_lr: float = 1e-4
+    base_lr: float = 1.4e-6
     min_lr: float = 1e-6
     warmup_ratio: float = 0.05
     max_grad_norm: float = 10.0
     num_ddim_steps_teacher: int = 10
     num_ddim_steps_student: int = 4
     action_model_type_teacher: str = "DiT-B"
-    action_model_type_student: str = "DiT-S"
+    action_model_type_student: str = "DiT-B"
     future_action_window_size: int = 15
     past_action_window_size: int = 0
     action_dim: int = 7

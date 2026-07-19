@@ -76,6 +76,8 @@ CUDA_VISIBLE_DEVICES=2 nohup  torchrun --standalone --nnodes 1 --nproc-per-node 
 # 
 
 --trackers "['jsonl','wandb']" \
+cd /data/huangjiaqi/projects/CogACT
+conda activate cogact
 
 export NCCL_SOCKET_IFNAME=eno1
 export NCCL_IB_DISABLE=1
@@ -87,7 +89,7 @@ export CUDA_LAUNCH_BLOCKING=1
 export TORCH_NCCL_BLOCKING_WAIT=1
 
 PYTHONPATH=. \
-CUDA_VISIBLE_DEVICES=0,1 \
+CUDA_VISIBLE_DEVICES=0,2 \
 HF_data=/data/huangjiaqi/.cache/huggingface \
 HF_HUB_OFFLINE=1 \
 proxy_up torchrun --standalone --nnodes 1 \
@@ -98,22 +100,22 @@ proxy_up torchrun --standalone --nnodes 1 \
   --reduce_in_full_precision True \
   --use_student_ddp True \
   --enable_train_eval True \
-  --data_root_dir "/data/huangjiaqi/.vscode-server/openvla_data" \
+  --data_root_dir "/home/huangjiaqi/.vscode-server/openvla_data" \
   --pretrained_checkpoint "/data/huangjiaqi/projects/CogACT-Base" \
-  --resume_checkpoint /data/huangjiaqi/projects/CogACT/runs/distillation/checkpoint_final.pt \
-  --checkpoint_suffix "" \
-  --run_id distill-008-100000 \
-  --wandb_project cogact-distillation \
+  --resume_checkpoint /data/huangjiaqi/projects/CogACT/runs/distillation/checkpoint_step_046000.pt  --run_id distill-001-100000 \
+  --trackers "['jsonl','wandb']" \
+  --wandb_project cogact-distillation-ditb \
   --data_mix bridge \
   --log_memory False \
   --log_memory_tf False \
   --batch_size 4 \
-  --max_batches 50000 \
+  --max_batches 100000 \
   --shuffle_buffer_size 1024 \
   --num_ddim_steps_teacher 20 \
   --num_ddim_steps_student 4 \
   >scripts/distillation.log 2>&1 &
    --trackers "['jsonl','wandb']" \
+  --resume_checkpoint /data/huangjiaqi/projects/CogACT/runs/distillation/checkpoint_final.pt \
 
 
 
@@ -148,16 +150,16 @@ PYTHONPATH=. CUDA_VISIBLE_DEVICES=1 \
 conda activate simpler_env
 cd /data/huangjiaqi/projects/SimplerEnv
 bash /data/huangjiaqi/projects/SimplerEnv/simpler_env/policies/sim_cogact/scripts/cogact_pick_coke_can_visual_matching.sh  \
- > /data/huangjiaqi/projects/SimplerEnv/simpler_env/log/simpler_pick_coke.log 2>&1 &
+ > /data/huangjiaqi/projects/SimplerEnv/simpler_env/log/DiT-B/simpler_pick_coke.log 2>&1 &
 
 bash /data/huangjiaqi/projects/SimplerEnv/simpler_env/policies/sim_cogact/scripts/cogact_put_in_drawer_variant_agg.sh \
-> /data/huangjiaqi/projects/SimplerEnv/simpler_env/log/simpler_put_in_drawer.log 2>&1 &
+> /data/huangjiaqi/projects/SimplerEnv/simpler_env/log/DiT-B/simpler_put_in_drawer.log 2>&1 &
 
 bash simpler_env/policies/sim_cogact/scripts/cogact_move_near_visual_matching.sh \
-> /data/huangjiaqi/projects/SimplerEnv/simpler_env/log/simpler_move_near_visual_matching.log 2>&1
+> /data/huangjiaqi/projects/SimplerEnv/simpler_env/log/DiT-B/simpler_move_near_visual_matching.log 2>&1
 
 bash simpler_env/policies/sim_cogact/scripts/cogact_put_in_drawer_variant_agg.sh \
-> /data/huangjiaqi/projects/SimplerEnv/simpler_env/log/simpler_pick_coke_variant.log 2>&1
+> /data/huangjiaqi/projects/SimplerEnv/simpler_env/log/DiT-B/simpler_pick_coke_variant.log 2>&1
 
 
 timing:

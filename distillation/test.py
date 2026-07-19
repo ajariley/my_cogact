@@ -49,7 +49,7 @@ def parse_args() -> argparse.Namespace:
         help="Optional distillation checkpoint path used by load_checkpoint for the student.",
     )
     parser.add_argument("--action-model-type-teacher", default="DiT-B")
-    parser.add_argument("--action-model-type-student", default="DiT-S")
+    parser.add_argument("--action-model-type-student", default="DiT-B")
     parser.add_argument("--future-action-window-size", type=int, default=15)
     parser.add_argument("--past-action-window-size", type=int, default=0)
     parser.add_argument("--action-dim", type=int, default=7)
