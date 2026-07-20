@@ -2,6 +2,7 @@ import unittest
 
 import torch
 
+from action_model import create_diffusion
 from action_model.action_model import ActionModel
 from action_model.models import DiT
 
@@ -93,6 +94,64 @@ class ActionModelDepthOutputsTest(unittest.TestCase):
 
         self.assertEqual(final_output.shape, (1, 2, 3))
         self.assertEqual(depth_outputs.shape, (6, 1, 2, 3))
+
+
+class DiffusionDepthPredictionTest(unittest.TestCase):
+    def setUp(self):
+        torch.manual_seed(0)
+        self.diffusion = create_diffusion(
+            timestep_respacing="ddim2",
+            diffusion_steps=100,
+            learn_sigma=False,
+        )
+        self.model = DiT(
+            in_channels=3,
+            hidden_size=32,
+            depth=3,
+            num_heads=4,
+            token_size=8,
+            future_action_window_size=4,
+        ).eval()
+        self.noise = torch.randn(2, 5, 3)
+        self.z = torch.randn(2, 1, 8)
+
+    def test_depth_eps_to_x0_matches_scalar_formula(self):
+        timestep = torch.tensor([0, 1])
+        depth_eps = torch.randn(3, *self.noise.shape)
+
+        depth_x0 = self.diffusion._predict_depth_xstart_from_eps(
+            self.noise,
+            timestep,
+            depth_eps,
+        )
+
+        for layer in range(depth_eps.shape[0]):
+            expected = self.diffusion._predict_xstart_from_eps(
+                self.noise,
+                timestep,
+                depth_eps[layer],
+            )
+            torch.testing.assert_close(depth_x0[layer], expected)
+
+    def test_ddim_exposes_x0_for_every_depth_node(self):
+        outputs = list(
+            self.diffusion.ddim_sample_loop_progressive(
+                self.model,
+                self.noise.shape,
+                noise=self.noise,
+                clip_denoised=False,
+                model_kwargs={"z": self.z, "return_depth_outputs": True},
+                device=torch.device("cpu"),
+            )
+        )
+
+        self.assertEqual(len(outputs), 2)
+        for output in outputs:
+            self.assertEqual(output["depth_pred_xstart"].shape, (3, 2, 5, 3))
+            torch.testing.assert_close(
+                output["depth_pred_xstart"][-1],
+                output["pred_xstart"],
+            )
 
 
 if __name__ == "__main__":

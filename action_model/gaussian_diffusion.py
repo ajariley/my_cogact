@@ -329,6 +329,23 @@ class GaussianDiffusion:
             pred_xstart = process_xstart(
                 self._predict_xstart_from_eps(x_t=x, t=t, eps=model_output)
             )
+        depth_pred_xstart = None
+        if extra is not None:
+            if not isinstance(extra, th.Tensor) or extra.shape[1:] != x.shape:
+                raise RuntimeError(
+                    "per-block model output must have shape [L, *x.shape], "
+                    f"got extra={getattr(extra, 'shape', None)}, x={tuple(x.shape)}"
+                )
+            if self.model_mean_type == ModelMeanType.START_X:
+                depth_pred_xstart = process_xstart(extra)
+            elif self.model_mean_type == ModelMeanType.EPSILON:
+                depth_pred_xstart = process_xstart(
+                    self._predict_depth_xstart_from_eps(x_t=x, t=t, eps=extra)
+                )
+            else:
+                raise NotImplementedError(
+                    "per-block x0 prediction is only supported for START_X and EPSILON model outputs"
+                )
         model_mean, _, _ = self.q_posterior_mean_variance(x_start=pred_xstart, x_t=x, t=t)
 
         assert model_mean.shape == pred_xstart.shape == x.shape # == model_log_variance.shape
@@ -338,6 +355,7 @@ class GaussianDiffusion:
             "log_variance": model_log_variance,
             "pred_xstart": pred_xstart,
             "extra": extra,
+            "depth_pred_xstart": depth_pred_xstart,
         }
 
     def _predict_xstart_from_eps(self, x_t, t, eps):
@@ -346,6 +364,21 @@ class GaussianDiffusion:
             _extract_into_tensor(self.sqrt_recip_alphas_cumprod, t, x_t.shape) * x_t
             - _extract_into_tensor(self.sqrt_recipm1_alphas_cumprod, t, x_t.shape) * eps
         )
+
+    def _predict_depth_xstart_from_eps(self, x_t, t, eps):
+        """Convert [L, B, ...] epsilon predictions to x0 estimates."""
+        if eps.dim() != x_t.dim() + 1 or eps.shape[1:] != x_t.shape:
+            raise RuntimeError(
+                f"depth eps must have shape [L, *x_t.shape], got eps={tuple(eps.shape)}, "
+                f"x_t={tuple(x_t.shape)}"
+            )
+        sqrt_recip_alpha = _extract_into_tensor(
+            self.sqrt_recip_alphas_cumprod, t, x_t.shape
+        ).unsqueeze(0)
+        sqrt_recipm1_alpha = _extract_into_tensor(
+            self.sqrt_recipm1_alphas_cumprod, t, x_t.shape
+        ).unsqueeze(0)
+        return sqrt_recip_alpha * x_t.unsqueeze(0) - sqrt_recipm1_alpha * eps
 
     def _predict_eps_from_xstart(self, x_t, t, pred_xstart):
         return (
@@ -423,7 +456,11 @@ class GaussianDiffusion:
         if cond_fn is not None:
             out["mean"] = self.condition_mean(cond_fn, out, x, t, model_kwargs=model_kwargs)
         sample = out["mean"] + nonzero_mask * th.exp(0.5 * out["log_variance"]) * noise
-        return {"sample": sample, "pred_xstart": out["pred_xstart"]}
+        return {
+            "sample": sample,
+            "pred_xstart": out["pred_xstart"],
+            "depth_pred_xstart": out["depth_pred_xstart"],
+        }
 
     def p_sample_loop(
         self,
@@ -566,7 +603,11 @@ class GaussianDiffusion:
             (t != 0).float().view(-1, *([1] * (len(x.shape) - 1)))
         )  # no noise when t == 0
         sample = mean_pred + nonzero_mask * sigma * noise
-        return {"sample": sample, "pred_xstart": out["pred_xstart"]}
+        return {
+            "sample": sample,
+            "pred_xstart": out["pred_xstart"],
+            "depth_pred_xstart": out["depth_pred_xstart"],
+        }
 
     def ddim_reverse_sample(
         self,
