@@ -52,6 +52,15 @@ class ActionModel(nn.Module):
                                         past_action_window_size = past_action_window_size
                                         )
 
+    def forward(self, x, timestep, z, return_depth_outputs=False):
+        """Predict noise, optionally returning per-DiT-block predictions."""
+        return self.net(
+            x,
+            timestep,
+            z,
+            return_depth_outputs=return_depth_outputs,
+        )
+
     # Given condition z and ground truth token x, compute loss
     def loss(self, x, z):
         # sample random noise and timestep

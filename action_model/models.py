@@ -231,13 +231,15 @@ class DiT(nn.Module):
         nn.init.constant_(self.final_layer.linear.weight, 0)
         nn.init.constant_(self.final_layer.linear.bias, 0)
 
-    def forward(self, x, t, z):
+    def forward(self, x, t, z, return_depth_outputs=False):
         """
         Forward pass of DiT.
         history: (N, H, D) tensor of action history # not used now
         x: (N, T, D) tensor of predicting action inputs
         t: (N,) tensor of diffusion timesteps
         z: (N, 1, D) tensor of conditions
+        return_depth_outputs: if True, also return per-block noise predictions
+            with shape (L, N, T, C)
         """
         x = self.x_embedder(x)                              # (N, T, D)
         t = self.t_embedder(t)                              # (N, D)
@@ -245,12 +247,18 @@ class DiT(nn.Module):
         c = t.unsqueeze(1) + z                              # (N, 1, D)
         x = torch.cat((c, x), dim=1)                        # (N, T+1, D)
         x = x + self.positional_embedding                   # (N, T+1, D)
+        depth_outputs = [] if return_depth_outputs else None
         for block in self.blocks:
             x = block(x)                                    # (N, T+1, D)
-        x = self.final_layer(x)                             # (N, T+1, out_channels)
-        return x[:, 1:, :]     # (N, T, C)
+            if return_depth_outputs:
+                depth_outputs.append(self.final_layer(x)[:, 1:, :])
 
-    def forward_with_cfg(self, x, t, z, cfg_scale):
+        model_out = self.final_layer(x)[:, 1:, :]           # (N, T, C)
+        if not return_depth_outputs:
+            return model_out
+        return model_out, torch.stack(depth_outputs, dim=0)  # (L, N, T, C)
+
+    def forward_with_cfg(self, x, t, z, cfg_scale, return_depth_outputs=False):
         """
         Forward pass of Diffusion, but also batches the unconditional forward pass for classifier-free guidance.
         """
@@ -258,11 +266,25 @@ class DiT(nn.Module):
         # https://github.com/openai/glide-text2im/blob/main/notebooks/text2im.ipynb
         half = x[: len(x) // 2]
         combined = torch.cat([half, half], dim=0).to(next(self.x_embedder.parameters()).dtype)
-        model_out = self.forward(combined, t, z)
+        forward_out = self.forward(combined, t, z, return_depth_outputs=return_depth_outputs)
+        if return_depth_outputs:
+            model_out, depth_outputs = forward_out
+        else:
+            model_out = forward_out
         # eps, rest = model_out[:, :self.in_channels], model_out[:, self.in_channels:]
         eps, rest = model_out[:, :, :self.in_channels], model_out[:, :, self.in_channels:]
         cond_eps, uncond_eps = torch.split(eps, len(eps) // 2, dim=0)
         half_eps = uncond_eps + cfg_scale * (cond_eps - uncond_eps)
         eps = torch.cat([half_eps, half_eps], dim=0)
         # return torch.cat([eps, rest], dim=1)
-        return torch.cat([eps, rest], dim=2)
+        model_out = torch.cat([eps, rest], dim=2)
+        if not return_depth_outputs:
+            return model_out
+
+        depth_eps = depth_outputs[..., :self.in_channels]
+        depth_rest = depth_outputs[..., self.in_channels:]
+        cond_depth_eps, uncond_depth_eps = torch.chunk(depth_eps, 2, dim=1)
+        guided_depth_eps = uncond_depth_eps + cfg_scale * (cond_depth_eps - uncond_depth_eps)
+        guided_depth_eps = torch.cat([guided_depth_eps, guided_depth_eps], dim=1)
+        depth_outputs = torch.cat([guided_depth_eps, depth_rest], dim=-1)
+        return model_out, depth_outputs
