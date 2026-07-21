@@ -2,15 +2,7 @@
 
 from pathlib import Path
 from dataclasses import dataclass
-from typing import Dict, Optional, Any, Tuple
-
-import torch
-from torch.utils.data import DataLoader
-import draccus
-
-from vla import load_vla, CogACT
-from action_model.action_model import ActionModel
-from prismatic.vla import get_vla_dataset_and_collator
+from typing import Optional, Tuple
 
 
 @dataclass
@@ -51,6 +43,10 @@ class DistillationConfig:
     lambda_task: float = 0.3
     lambda_final: float = 1.0
     lambda_traj: float = 0.2
+    lambda_path: float = 0.0
+    lambda_macro: float = 0.0
+    refinement_progress_eps: float = 1e-8
+    refinement_action_dim_weights: Optional[Tuple[float, ...]] = None
     lambda_neg: float = 0.1
     use_instruction_constraint: bool = True  # 指令敏感：同图+错误指令→z_wrong，L_neg 拉大学生(corr)与(wrong)距离
     log_memory: bool = False
