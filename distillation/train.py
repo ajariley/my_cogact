@@ -308,7 +308,7 @@ def train_distillation(cfg: DistillationConfig, hf_token: Optional[str] = None) 
             noise = torch.randn(B, T, C, device=device)
             student_timesteps = get_student_timesteps(student, cfg.num_ddim_steps_student)
 
-            # 2. Teacher DDIM. Current loss only uses x0_teacher and z_corr.
+            # 2. Teacher DDIM: record both timestep-aligned samples and the full depth path.
     
             with torch.no_grad():
                 teacher_results = run_teacher_with_recording(
@@ -350,7 +350,9 @@ def train_distillation(cfg: DistillationConfig, hf_token: Optional[str] = None) 
                     f"teacher_recorded_timesteps={teacher_results['timesteps']} "
                     f"student_recorded_timesteps={student_results['timesteps']} "
                     f"teacher_trajectory.shape={list(teacher_results['trajectory'].shape)} "
-                    f"student_trajectory.shape={list(student_results['trajectory'].shape)}"
+                    f"student_trajectory.shape={list(student_results['trajectory'].shape)} "
+                    f"teacher_depth_path.shape={list(teacher_results['depth_x0_path'].shape)} "
+                    f"student_depth_path.shape={list(student_results['depth_x0_path'].shape)}"
                 )
             if x0_teacher.shape != x0_student.shape or x0_student.shape != actions_future.shape:
                 raise RuntimeError(
@@ -375,6 +377,8 @@ def train_distillation(cfg: DistillationConfig, hf_token: Optional[str] = None) 
                 teacher_trajectory=teacher_results["trajectory"],
                 student_trajectory=student_results["trajectory"],
                 cfg=cfg,
+                teacher_depth_path=teacher_results["depth_x0_path"],
+                student_depth_path=student_results["depth_x0_path"],
             )
             for loss_name, loss_value in loss_dict.items():
                 if not torch.isfinite(loss_value):
@@ -402,6 +406,14 @@ def train_distillation(cfg: DistillationConfig, hf_token: Optional[str] = None) 
             loss_task = float(loss_dict["task"].item())
             loss_final = float(loss_dict["final"].item())
             loss_traj = float(loss_dict["traj"].item())
+            loss_path = float(loss_dict["path"].item())
+            loss_macro = float(loss_dict["macro"].item())
+            cuda_memory_allocated_mb = (
+                float(torch.cuda.memory_allocated(device) / 1024**2) if torch.cuda.is_available() else 0.0
+            )
+            cuda_max_memory_allocated_mb = (
+                float(torch.cuda.max_memory_allocated(device) / 1024**2) if torch.cuda.is_available() else 0.0
+            )
             metrics = {
                 "step": batch_count,
                 "epoch": epoch + 1,
@@ -409,9 +421,13 @@ def train_distillation(cfg: DistillationConfig, hf_token: Optional[str] = None) 
                 "loss_task": loss_task,
                 "loss_final": loss_final,
                 "loss_traj": loss_traj,
+                "loss_path": loss_path,
+                "loss_macro": loss_macro,
                 "lambda_task": cfg.lambda_task,
                 "lambda_final": cfg.lambda_final,
                 "lambda_traj": cfg.lambda_traj,
+                "lambda_path": cfg.lambda_path,
+                "lambda_macro": cfg.lambda_macro,
                 "lambda_neg": cfg.lambda_neg,
                 "grad_norm": grad_norm,
                 "max_grad_norm": cfg.max_grad_norm,
@@ -426,6 +442,12 @@ def train_distillation(cfg: DistillationConfig, hf_token: Optional[str] = None) 
                 "teacher_trajectory_shape": list(teacher_results["trajectory"].shape),
                 "teacher_timesteps": teacher_results["timesteps"],
                 "teacher_full_timesteps": teacher_results["teacher_full_timesteps"],
+                "teacher_depth_path_shape": list(teacher_results["depth_x0_path"].shape),
+                "student_depth_path_shape": list(student_results["depth_x0_path"].shape),
+                "teacher_depth_node_count": int(teacher_results["depth_x0_path"].shape[0]),
+                "student_depth_node_count": int(student_results["depth_x0_path"].shape[0]),
+                "cuda_memory_allocated_mb": cuda_memory_allocated_mb,
+                "cuda_max_memory_allocated_mb": cuda_max_memory_allocated_mb,
             }
             if overwatch.is_rank_zero():
                 append_metrics_jsonl(metrics_path, metrics)
@@ -436,10 +458,18 @@ def train_distillation(cfg: DistillationConfig, hf_token: Optional[str] = None) 
                         "loss/task": loss_task,
                         "loss/final": loss_final,
                         "loss/traj": loss_traj,
+                        "loss/path": loss_path,
+                        "loss/macro": loss_macro,
                         "lambda/task": cfg.lambda_task,
                         "lambda/final": cfg.lambda_final,
                         "lambda/traj": cfg.lambda_traj,
+                        "lambda/path": cfg.lambda_path,
+                        "lambda/macro": cfg.lambda_macro,
                         "lambda/neg": cfg.lambda_neg,
+                        "depth/teacher_node_count": metrics["teacher_depth_node_count"],
+                        "depth/student_node_count": metrics["student_depth_node_count"],
+                        "memory/cuda_allocated_mb": cuda_memory_allocated_mb,
+                        "memory/cuda_max_allocated_mb": cuda_max_memory_allocated_mb,
                         "grad_norm": grad_norm,
                         "max_grad_norm": cfg.max_grad_norm,
                         "was_clipped": float(was_clipped),
@@ -454,6 +484,9 @@ def train_distillation(cfg: DistillationConfig, hf_token: Optional[str] = None) 
                 loss_total=loss_total,
                 loss_task=loss_task,
                 loss_final=loss_final,
+                loss_traj=loss_traj,
+                loss_path=loss_path,
+                loss_macro=loss_macro,
                 grad_norm=grad_norm,
                 lr=lr,
             )
@@ -500,6 +533,8 @@ def train_distillation(cfg: DistillationConfig, hf_token: Optional[str] = None) 
                         {
                             "eval/mean_loss_final": eval_summary["eval/mean_loss_final"],
                             "eval/mean_loss_traj": eval_summary["eval/mean_loss_traj"],
+                            "eval/mean_loss_path": eval_summary["eval/mean_loss_path"],
+                            "eval/mean_loss_macro": eval_summary["eval/mean_loss_macro"],
                             "eval/mean_student_teacher_final_mse": eval_summary[
                                 "eval/mean_student_teacher_final_mse"
                             ],

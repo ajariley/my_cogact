@@ -9,6 +9,7 @@ import torch.distributed as dist
 from action_model.action_model import ActionModel
 from conf.distillation import DistillationConfig
 from distillation.loaders import load_dataloader
+from distillation.path import depth_path_losses
 from distillation.runners import (
     get_student_timesteps,
     run_student_ddim_with_recording,
@@ -135,6 +136,8 @@ def run_train_eval(
     sums = {
         "eval/loss_final": 0.0,
         "eval/loss_traj": 0.0,
+        "eval/loss_path": 0.0,
+        "eval/loss_macro": 0.0,
         "eval/student_teacher_final_mse": 0.0,
         "eval/student_gt_action_mse": 0.0,
         "eval/teacher_gt_action_mse": 0.0,
@@ -185,8 +188,18 @@ def run_train_eval(
                 )
             loss_final = float(torch.nn.functional.mse_loss(x0_student, x0_teacher).item())
             loss_traj = float(torch.nn.functional.mse_loss(student_traj, teacher_traj).item())
+            loss_path_tensor, loss_macro_tensor, _ = depth_path_losses(
+                student_out["depth_x0_path"],
+                teacher_out["depth_x0_path"],
+                action_dim_weights=cfg.refinement_action_dim_weights,
+                eps=cfg.refinement_progress_eps,
+            )
+            loss_path = float(loss_path_tensor.item())
+            loss_macro = float(loss_macro_tensor.item())
             sums["eval/loss_final"] += loss_final
             sums["eval/loss_traj"] += loss_traj
+            sums["eval/loss_path"] += loss_path
+            sums["eval/loss_macro"] += loss_macro
             sums["eval/student_teacher_final_mse"] += loss_final
             sums["eval/student_gt_action_mse"] += float(torch.nn.functional.mse_loss(x0_student, actions_future).item())
             sums["eval/teacher_gt_action_mse"] += float(torch.nn.functional.mse_loss(x0_teacher, actions_future).item())
@@ -200,6 +213,8 @@ def run_train_eval(
         [
             sums["eval/loss_final"],
             sums["eval/loss_traj"],
+            sums["eval/loss_path"],
+            sums["eval/loss_macro"],
             sums["eval/student_teacher_final_mse"],
             sums["eval/student_gt_action_mse"],
             sums["eval/teacher_gt_action_mse"],
@@ -211,16 +226,18 @@ def run_train_eval(
     if dist.is_available() and dist.is_initialized():
         dist.all_reduce(local, op=dist.ReduceOp.SUM)
 
-    total_count = int(local[5].item())
+    total_count = int(local[7].item())
     return {
         "type": "train_eval_summary",
         "eval/num_batches": total_count,
         "eval_cache_path": str(eval_cache_path),
         "eval/mean_loss_final": float(local[0].item() / total_count),
         "eval/mean_loss_traj": float(local[1].item() / total_count),
-        "eval/mean_student_teacher_final_mse": float(local[2].item() / total_count),
-        "eval/mean_student_gt_action_mse": float(local[3].item() / total_count),
-        "eval/mean_teacher_gt_action_mse": float(local[4].item() / total_count),
+        "eval/mean_loss_path": float(local[2].item() / total_count),
+        "eval/mean_loss_macro": float(local[3].item() / total_count),
+        "eval/mean_student_teacher_final_mse": float(local[4].item() / total_count),
+        "eval/mean_student_gt_action_mse": float(local[5].item() / total_count),
+        "eval/mean_teacher_gt_action_mse": float(local[6].item() / total_count),
     }
 
 

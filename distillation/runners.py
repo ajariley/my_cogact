@@ -1,23 +1,13 @@
 
-from pathlib import Path
-from dataclasses import dataclass
-from typing import Dict, Optional, Any
+from typing import Any, Dict
 
 import torch
-from torch.utils.data import DataLoader
-import draccus
-
-from vla import load_vla, CogACT
-from action_model.action_model import ActionModel
-from prismatic.vla import get_vla_dataset_and_collator
-from prismatic.overwatch import initialize_overwatch
-
 from torch.cuda.amp import autocast
 
-overwatch = initialize_overwatch(__name__)
+from action_model.action_model import ActionModel
 
 def get_cognition_features(
-    teacher: CogACT,
+    teacher: Any,
     batch: Dict[str, torch.Tensor],
     device: torch.device,
 ) -> torch.Tensor:
@@ -183,6 +173,8 @@ def run_teacher_with_recording(
             f"got={len(trajectory)}, expected={len(record_timesteps)}, requested={record_timesteps}"
         )
 
+    #depth_x0_trajectory: [K,L,B,T,C]
+    #depth_x0_path:       [K×L,B,T,C]
     teacher_trajectory = torch.stack(trajectory, dim=0)
     teacher_depth_x0_trajectory = torch.stack(depth_x0_trajectory, dim=0)
     teacher_depth_x0_path = teacher_depth_x0_trajectory.flatten(0, 1)

@@ -223,6 +223,9 @@ def format_metric_row(
     loss_total: float,
     loss_task: float,
     loss_final: float,
+    loss_traj: float,
+    loss_path: float,
+    loss_macro: float,
     grad_norm: float | None,
     lr: float,
     actions_shape,
@@ -261,6 +264,9 @@ def format_metric_line(
         f"total={loss_total:.4f} "
         f"task={loss_task:.4f} "
         f"final={loss_final:.4f} "
+        f"traj={loss_traj:.4f} "
+        f"path={loss_path:.4f} "
+        f"macro={loss_macro:.4f} "
         f"grad={grad} "
         f"lr={lr:.2e}"
     )
