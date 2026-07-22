@@ -254,6 +254,9 @@ def format_metric_line(
     loss_total: float,
     loss_task: float,
     loss_final: float,
+    loss_traj: float,
+    loss_path: float,
+    loss_macro: float,
     grad_norm: float | None,
     lr: float,
 ) -> str:
