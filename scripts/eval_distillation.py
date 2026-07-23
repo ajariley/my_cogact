@@ -41,6 +41,7 @@ from distillation.runners import (
     run_student_ddim_with_recording,
     run_teacher_with_recording,
 )
+from distillation.path import depth_path_losses
 from prismatic.overwatch import initialize_overwatch
 
 
@@ -180,14 +181,13 @@ def _eval_one_batch(
             cfg_scale=cfg.cfg_scale_teacher,
             device=device,
         )
-
-    student_out = run_student_ddim_with_recording(
-        student,
-        noise,
-        teacher_out["z_corr"],
-        cfg.num_ddim_steps_student,
-        device,
-    )
+        student_out = run_student_ddim_with_recording(
+            student,
+            noise,
+            teacher_out["z_corr"],
+            cfg.num_ddim_steps_student,
+            device,
+        )
 
     x0_teacher = teacher_out["x0_teacher"]
     x0_student = student_out["x0_student"]
@@ -209,11 +209,19 @@ def _eval_one_batch(
 
     loss_final = torch.nn.functional.mse_loss(x0_student, x0_teacher.detach())
     loss_traj = torch.nn.functional.mse_loss(student_traj, teacher_traj.detach())
+    loss_path, loss_macro, _ = depth_path_losses(
+        student_out["depth_x0_path"],
+        teacher_out["depth_x0_path"],
+        action_dim_weights=cfg.refinement_action_dim_weights,
+        eps=cfg.refinement_progress_eps,
+    )
     student_gt_action_mse = torch.nn.functional.mse_loss(x0_student, actions_future)
     teacher_gt_action_mse = torch.nn.functional.mse_loss(x0_teacher, actions_future)
     return {
         "eval/loss_final": float(loss_final.item()),
         "eval/loss_traj": float(loss_traj.item()),
+        "eval/loss_path": float(loss_path.item()),
+        "eval/loss_macro": float(loss_macro.item()),
         "eval/student_teacher_final_mse": float(loss_final.item()),
         "eval/student_gt_action_mse": float(student_gt_action_mse.item()),
         "eval/teacher_gt_action_mse": float(teacher_gt_action_mse.item()),
@@ -222,6 +230,8 @@ def _eval_one_batch(
         "teacher_full_timesteps": teacher_out["teacher_full_timesteps"],
         "teacher_trajectory_shape": list(teacher_traj.shape),
         "student_trajectory_shape": list(student_traj.shape),
+        "teacher_depth_path_shape": list(teacher_out["depth_x0_path"].shape),
+        "student_depth_path_shape": list(student_out["depth_x0_path"].shape),
         "x0_teacher_shape": list(x0_teacher.shape),
         "x0_student_shape": list(x0_student.shape),
     }
@@ -295,6 +305,8 @@ def main(cfg: DistillationConfig) -> None:
     sums = {
         "eval/loss_final": 0.0,
         "eval/loss_traj": 0.0,
+        "eval/loss_path": 0.0,
+        "eval/loss_macro": 0.0,
         "eval/student_teacher_final_mse": 0.0,
         "eval/student_gt_action_mse": 0.0,
         "eval/teacher_gt_action_mse": 0.0,
@@ -307,6 +319,9 @@ def main(cfg: DistillationConfig) -> None:
         "lambda_task": cfg.lambda_task,
         "lambda_final": cfg.lambda_final,
         "lambda_traj": cfg.lambda_traj,
+        "lambda_path": cfg.lambda_path,
+        "lambda_macro": cfg.lambda_macro,
+        "refinement_action_dim_weights": cfg.refinement_action_dim_weights,
         "lambda_neg": cfg.lambda_neg,
         "batch_size": cfg.batch_size,
         "max_batches": max_eval_batches,
@@ -343,6 +358,8 @@ def main(cfg: DistillationConfig) -> None:
             f"eval_step={count} "
             f"loss_final={row['eval/loss_final']:.6f} "
             f"loss_traj={row['eval/loss_traj']:.6f} "
+            f"loss_path={row['eval/loss_path']:.6f} "
+            f"loss_macro={row['eval/loss_macro']:.6f} "
             f"student_teacher_final_mse={row['eval/student_teacher_final_mse']:.6f} "
             f"student_gt_action_mse={row['eval/student_gt_action_mse']:.6f} "
             f"teacher_gt_action_mse={row['eval/teacher_gt_action_mse']:.6f}",
@@ -359,6 +376,8 @@ def main(cfg: DistillationConfig) -> None:
         "checkpoint": str(cfg.resume_checkpoint),
         "eval/mean_loss_final": sums["eval/loss_final"] / count,
         "eval/mean_loss_traj": sums["eval/loss_traj"] / count,
+        "eval/mean_loss_path": sums["eval/loss_path"] / count,
+        "eval/mean_loss_macro": sums["eval/loss_macro"] / count,
         "eval/mean_student_teacher_final_mse": sums["eval/student_teacher_final_mse"] / count,
         "eval/mean_student_gt_action_mse": sums["eval/student_gt_action_mse"] / count,
         "eval/mean_teacher_gt_action_mse": sums["eval/teacher_gt_action_mse"] / count,
@@ -369,6 +388,8 @@ def main(cfg: DistillationConfig) -> None:
         f"eval_summary num_batches={count} "
         f"mean_loss_final={summary['eval/mean_loss_final']:.6f} "
         f"mean_loss_traj={summary['eval/mean_loss_traj']:.6f} "
+        f"mean_loss_path={summary['eval/mean_loss_path']:.6f} "
+        f"mean_loss_macro={summary['eval/mean_loss_macro']:.6f} "
         f"mean_student_teacher_final_mse={summary['eval/mean_student_teacher_final_mse']:.6f} "
         f"mean_student_gt_action_mse={summary['eval/mean_student_gt_action_mse']:.6f} "
         f"mean_teacher_gt_action_mse={summary['eval/mean_teacher_gt_action_mse']:.6f}",

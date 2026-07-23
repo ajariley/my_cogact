@@ -1,23 +1,13 @@
 
-from pathlib import Path
-from dataclasses import dataclass
-from typing import Dict, Optional, Any
+from typing import Any, Dict
 
 import torch
-from torch.utils.data import DataLoader
-import draccus
-
-from vla import load_vla, CogACT
-from action_model.action_model import ActionModel
-from prismatic.vla import get_vla_dataset_and_collator
-from prismatic.overwatch import initialize_overwatch
-
 from torch.cuda.amp import autocast
 
-overwatch = initialize_overwatch(__name__)
+from action_model.action_model import ActionModel
 
 def get_cognition_features(
-    teacher: CogACT,
+    teacher: Any,
     batch: Dict[str, torch.Tensor],
     device: torch.device,
 ) -> torch.Tensor:
@@ -73,6 +63,8 @@ def run_teacher_with_recording(
     返回：{
         "x0_teacher": ...,
         "trajectory": [K, B, T, C],
+        "depth_x0_trajectory": [K_full, L, B, T, C],
+        "depth_x0_path": [K_full * L, B, T, C],
         "timesteps": [original diffusion timestep, ...],
         "z_corr": ...,
     }
@@ -109,7 +101,7 @@ def run_teacher_with_recording(
     # 2
     z = torch.cat([z_corr, uncondition], dim=0)
     noise_cfg = torch.cat([noise, noise], dim=0).to(device=device, dtype=model_dtype)
-    model_kwargs = dict(z=z, cfg_scale=cfg_scale)
+    model_kwargs = dict(z=z, cfg_scale=cfg_scale, return_depth_outputs=True)
     sample_fn = teacher.action_model.net.forward_with_cfg               # 带CFG的forward函数，传入采样循环，用来预测噪声，定义在action_model.py中
 
     _sample_fn_logged = False
@@ -152,6 +144,7 @@ def run_teacher_with_recording(
     record_timestep_set = set(record_timesteps)
 
     trajectory = []
+    depth_x0_trajectory = []
     for timestep, out in zip(
         teacher_timesteps,
         teacher.action_model.ddim_diffusion.ddim_sample_loop_progressive(# 采样循环，定义在ddim_diffusion.py中
@@ -165,6 +158,11 @@ def run_teacher_with_recording(
         eta=0.0,
         ),
     ):
+        depth_pred_xstart = out["depth_pred_xstart"]
+        if depth_pred_xstart is None:
+            raise RuntimeError("teacher DDIM step did not return per-block x0 predictions")
+        depth_pred_xstart, _ = depth_pred_xstart.chunk(2, dim=1)
+        depth_x0_trajectory.append(depth_pred_xstart)
         if timestep in record_timestep_set:
             sample, _ = out["sample"].chunk(2, dim=0)  # 去掉 CFG 的 null 部分
             trajectory.append(sample)
@@ -175,10 +173,17 @@ def run_teacher_with_recording(
             f"got={len(trajectory)}, expected={len(record_timesteps)}, requested={record_timesteps}"
         )
 
+    #depth_x0_trajectory: [K,L,B,T,C]
+    #depth_x0_path:       [K×L,B,T,C]
     teacher_trajectory = torch.stack(trajectory, dim=0)
+    teacher_depth_x0_trajectory = torch.stack(depth_x0_trajectory, dim=0)
+    teacher_depth_x0_path = teacher_depth_x0_trajectory.flatten(0, 1)
     return {
         "x0_teacher": teacher_trajectory[-1],
         "trajectory": teacher_trajectory,
+        "depth_x0_trajectory": teacher_depth_x0_trajectory,
+        "depth_x0_path": teacher_depth_x0_path,
+        "depth_timesteps": teacher_timesteps,
         "timesteps": record_timesteps,
         "teacher_full_timesteps": teacher_timesteps,
         "z_corr": z_corr,
@@ -215,15 +220,18 @@ def run_student_ddim_with_recording(
     返回：{
         "x0_student": [B, T, C],
         "trajectory": [K, B, T, C],
+        "depth_x0_trajectory": [K, L, B, T, C],
+        "depth_x0_path": [K * L, B, T, C],
         "timesteps": [original diffusion timestep, ...],
     }
     """
     if student.ddim_diffusion is None or student.ddim_diffusion.num_timesteps != num_steps:
         student.create_ddim(ddim_step=num_steps)
-    model_kwargs = dict(z=z)
+    model_kwargs = dict(z=z, return_depth_outputs=True)
     sample_fn = student.net
 
     trajectory = []
+    depth_x0_trajectory = []
     for out in student.ddim_diffusion.ddim_sample_loop_progressive(
         sample_fn,
         noise.shape,
@@ -236,12 +244,20 @@ def run_student_ddim_with_recording(
         grad_enabled=True,
     ):
         trajectory.append(out["sample"])
+        depth_pred_xstart = out["depth_pred_xstart"]
+        if depth_pred_xstart is None:
+            raise RuntimeError("student DDIM step did not return per-block x0 predictions")
+        depth_x0_trajectory.append(depth_pred_xstart)
 
     if not trajectory:
         raise RuntimeError("student DDIM produced an empty trajectory")
 
+    student_depth_x0_trajectory = torch.stack(depth_x0_trajectory, dim=0)
     return {
         "x0_student": trajectory[-1],
         "trajectory": torch.stack(trajectory, dim=0),
+        "depth_x0_trajectory": student_depth_x0_trajectory,
+        "depth_x0_path": student_depth_x0_trajectory.flatten(0, 1),
+        "depth_timesteps": _ddim_original_timesteps(student.ddim_diffusion),
         "timesteps": _ddim_original_timesteps(student.ddim_diffusion),
     }
