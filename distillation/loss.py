@@ -25,7 +25,7 @@ def compute_loss(
     Compute the current distillation training loss.
 
     L_task trains the student diffusion head on real future actions.
-    L_final aligns the student's final DDIM sample with the teacher's final sample.
+    Ground truth supervises the final action; the Teacher supervises the process.
     """
     if x0_teacher.shape != x0_student.shape or x0_student.shape != actions_future.shape:
         raise RuntimeError(
@@ -42,11 +42,17 @@ def compute_loss(
         )
 
     loss_task = student.loss(actions_future, z_corr)
-    loss_final = torch.nn.functional.mse_loss(x0_student, x0_teacher.detach())
-    loss_traj = torch.nn.functional.mse_loss(
-        student_trajectory,
-        teacher_trajectory.detach(),
-    )
+    loss_final_gt = torch.nn.functional.mse_loss(x0_student, actions_future)
+    loss_final_teacher = torch.nn.functional.mse_loss(x0_student, x0_teacher.detach())
+    exclude_teacher_terminal = getattr(cfg, "exclude_teacher_terminal", True)
+    if exclude_teacher_terminal and student_trajectory.shape[0] <= 1:
+        loss_traj_teacher = x0_student.new_zeros(())
+    else:
+        trajectory_slice = slice(None, -1) if exclude_teacher_terminal else slice(None)
+        loss_traj_teacher = torch.nn.functional.mse_loss(
+            student_trajectory[trajectory_slice],
+            teacher_trajectory[trajectory_slice].detach(),
+        )
     loss_path = x0_student.new_zeros(())
     loss_macro = x0_student.new_zeros(())
     if teacher_depth_path is not None and student_depth_path is not None:
@@ -56,6 +62,7 @@ def compute_loss(
             teacher_depth_path,
             action_dim_weights=action_dim_weights,
             eps=cfg.refinement_progress_eps,
+            exclude_terminal=exclude_teacher_terminal,
         )
     elif cfg.lambda_path != 0 or cfg.lambda_macro != 0:
         raise RuntimeError(
@@ -64,18 +71,20 @@ def compute_loss(
 
     loss_total = (
         cfg.lambda_task * loss_task
-        + cfg.lambda_final * loss_final
-        + cfg.lambda_traj * loss_traj
+        + cfg.lambda_final_gt * loss_final_gt
+        + cfg.lambda_final * loss_final_teacher
+        + cfg.lambda_traj * loss_traj_teacher
         + cfg.lambda_path * loss_path
         + cfg.lambda_macro * loss_macro
     )
     return {
         "total": loss_total,
         "task": loss_task,
-        "final": loss_final,
-        "traj": loss_traj,
-        "path": loss_path,
-        "macro": loss_macro,
+        "final_gt": loss_final_gt,
+        "final_teacher": loss_final_teacher,
+        "traj_teacher": loss_traj_teacher,
+        "path_teacher": loss_path,
+        "macro_teacher": loss_macro,
     }
 
 

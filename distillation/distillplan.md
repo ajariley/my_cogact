@@ -95,6 +95,8 @@ batch_size=1 完成完整 forward/backward/checkpoint。
 checkpoint 能由 SimplerEnv 正常加载，推理接口和 action shape 不变。
 
 ## 5. Teacher 与 GT 分工监督
+### 状态：已实现
+
 ### 可行性与目标：
 该方案可行。Teacher 的优势是提供稠密、平滑的动作生成过程，GT 的优势是提供不受 Teacher 偏差影响的真实任务终点。因此将监督拆分为：
 
@@ -136,6 +138,12 @@ MSE(x0_student, x0_teacher)
 ```
 
 在严格分工实验中关闭，仅保留为兼容 baseline 的配置开关。
+
+实现中的兼容参数映射：`lambda_final_gt` 对应 GT Final；原有
+`lambda_final` 对应可选 Teacher Final，默认值已设为 `0.0`；原有
+`lambda_traj`、`lambda_path`、`lambda_macro` 分别对应三个 Teacher
+过程损失。`exclude_teacher_terminal=True` 时，Teacher 终点会在轨迹监督和
+路径进度压缩之前被排除。
 
 ### 修改文件：
 - `distillation/loss.py`

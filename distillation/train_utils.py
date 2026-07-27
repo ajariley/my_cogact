@@ -134,10 +134,11 @@ def run_train_eval(
     )
 
     sums = {
-        "eval/loss_final": 0.0,
-        "eval/loss_traj": 0.0,
-        "eval/loss_path": 0.0,
-        "eval/loss_macro": 0.0,
+        "eval/loss_final_gt": 0.0,
+        "eval/loss_final_teacher": 0.0,
+        "eval/loss_traj_teacher": 0.0,
+        "eval/loss_path_teacher": 0.0,
+        "eval/loss_macro_teacher": 0.0,
         "eval/student_teacher_final_mse": 0.0,
         "eval/student_gt_action_mse": 0.0,
         "eval/teacher_gt_action_mse": 0.0,
@@ -186,22 +187,28 @@ def run_train_eval(
                     "train eval trajectory shape mismatch: "
                     f"teacher={tuple(teacher_traj.shape)}, student={tuple(student_traj.shape)}"
                 )
-            loss_final = float(torch.nn.functional.mse_loss(x0_student, x0_teacher).item())
-            loss_traj = float(torch.nn.functional.mse_loss(student_traj, teacher_traj).item())
+            loss_final_gt = float(torch.nn.functional.mse_loss(x0_student, actions_future).item())
+            loss_final_teacher = float(torch.nn.functional.mse_loss(x0_student, x0_teacher).item())
+            trajectory_slice = slice(None, -1) if cfg.exclude_teacher_terminal else slice(None)
+            loss_traj_teacher = 0.0 if cfg.exclude_teacher_terminal and student_traj.shape[0] <= 1 else float(
+                torch.nn.functional.mse_loss(student_traj[trajectory_slice], teacher_traj[trajectory_slice]).item()
+            )
             loss_path_tensor, loss_macro_tensor, _ = depth_path_losses(
                 student_out["depth_x0_path"],
                 teacher_out["depth_x0_path"],
                 action_dim_weights=cfg.refinement_action_dim_weights,
                 eps=cfg.refinement_progress_eps,
+                exclude_terminal=cfg.exclude_teacher_terminal,
             )
-            loss_path = float(loss_path_tensor.item())
-            loss_macro = float(loss_macro_tensor.item())
-            sums["eval/loss_final"] += loss_final
-            sums["eval/loss_traj"] += loss_traj
-            sums["eval/loss_path"] += loss_path
-            sums["eval/loss_macro"] += loss_macro
-            sums["eval/student_teacher_final_mse"] += loss_final
-            sums["eval/student_gt_action_mse"] += float(torch.nn.functional.mse_loss(x0_student, actions_future).item())
+            loss_path_teacher = float(loss_path_tensor.item())
+            loss_macro_teacher = float(loss_macro_tensor.item())
+            sums["eval/loss_final_gt"] += loss_final_gt
+            sums["eval/loss_final_teacher"] += loss_final_teacher
+            sums["eval/loss_traj_teacher"] += loss_traj_teacher
+            sums["eval/loss_path_teacher"] += loss_path_teacher
+            sums["eval/loss_macro_teacher"] += loss_macro_teacher
+            sums["eval/student_teacher_final_mse"] += loss_final_teacher
+            sums["eval/student_gt_action_mse"] += loss_final_gt
             sums["eval/teacher_gt_action_mse"] += float(torch.nn.functional.mse_loss(x0_teacher, actions_future).item())
 
     if count == 0:
@@ -211,10 +218,11 @@ def run_train_eval(
 
     local = torch.tensor(
         [
-            sums["eval/loss_final"],
-            sums["eval/loss_traj"],
-            sums["eval/loss_path"],
-            sums["eval/loss_macro"],
+            sums["eval/loss_final_gt"],
+            sums["eval/loss_final_teacher"],
+            sums["eval/loss_traj_teacher"],
+            sums["eval/loss_path_teacher"],
+            sums["eval/loss_macro_teacher"],
             sums["eval/student_teacher_final_mse"],
             sums["eval/student_gt_action_mse"],
             sums["eval/teacher_gt_action_mse"],
@@ -226,18 +234,19 @@ def run_train_eval(
     if dist.is_available() and dist.is_initialized():
         dist.all_reduce(local, op=dist.ReduceOp.SUM)
 
-    total_count = int(local[7].item())
+    total_count = int(local[8].item())
     return {
         "type": "train_eval_summary",
         "eval/num_batches": total_count,
         "eval_cache_path": str(eval_cache_path),
-        "eval/mean_loss_final": float(local[0].item() / total_count),
-        "eval/mean_loss_traj": float(local[1].item() / total_count),
-        "eval/mean_loss_path": float(local[2].item() / total_count),
-        "eval/mean_loss_macro": float(local[3].item() / total_count),
-        "eval/mean_student_teacher_final_mse": float(local[4].item() / total_count),
-        "eval/mean_student_gt_action_mse": float(local[5].item() / total_count),
-        "eval/mean_teacher_gt_action_mse": float(local[6].item() / total_count),
+        "eval/mean_loss_final_gt": float(local[0].item() / total_count),
+        "eval/mean_loss_final_teacher": float(local[1].item() / total_count),
+        "eval/mean_loss_traj_teacher": float(local[2].item() / total_count),
+        "eval/mean_loss_path_teacher": float(local[3].item() / total_count),
+        "eval/mean_loss_macro_teacher": float(local[4].item() / total_count),
+        "eval/mean_student_teacher_final_mse": float(local[5].item() / total_count),
+        "eval/mean_student_gt_action_mse": float(local[6].item() / total_count),
+        "eval/mean_teacher_gt_action_mse": float(local[7].item() / total_count),
     }
 
 
