@@ -76,7 +76,7 @@ CUDA_VISIBLE_DEVICES=2 nohup  torchrun --standalone --nnodes 1 --nproc-per-node 
 # 
 
 --trackers "['jsonl','wandb']" \
-cd /data/huangjiaqi/projects/CogACT
+cd /data/huangjiaqi/projects/CogACT-depth-distill
 conda activate cogact
 
 export NCCL_SOCKET_IFNAME=eno1
@@ -89,7 +89,7 @@ export CUDA_LAUNCH_BLOCKING=1
 export TORCH_NCCL_BLOCKING_WAIT=1
 
 PYTHONPATH=/data/huangjiaqi/projects/CogACT-depth-distill \
-CUDA_VISIBLE_DEVICES=0,2 \
+CUDA_VISIBLE_DEVICES=1,2 \
 HF_data=/data/huangjiaqi/.cache/huggingface \
 HF_HUB_OFFLINE=1 \
 proxy_up torchrun --standalone --nnodes 1 \
@@ -104,6 +104,7 @@ proxy_up torchrun --standalone --nnodes 1 \
   --pretrained_checkpoint "/data/huangjiaqi/projects/CogACT-Base" \
   --trackers "['jsonl','wandb']" \
   --wandb_project cogact-distillation-depth \
+  --run_id teacher_gt_plan \
   --data_mix bridge \
   --log_memory False \
   --log_memory_tf False \
@@ -117,6 +118,8 @@ proxy_up torchrun --standalone --nnodes 1 \
   >scripts/distillation.log 2>&1 &
    --trackers "['jsonl','wandb']" \
   --resume_checkpoint /data/huangjiaqi/projects/CogACT/runs/distillation/checkpoint_final.pt \
+  --resume_checkpoint /data/huangjiaqi/projects/CogACT-depth-distill/runs/distillation/checkpoint_final.pt \
+
 
 
 
@@ -150,17 +153,20 @@ PYTHONPATH=. CUDA_VISIBLE_DEVICES=1 \
 
 conda activate simpler_env
 cd /data/huangjiaqi/projects/SimplerEnv
+PYTHONPATH=/data/huangjiaqi/projects/SimplerEnv
+MODEL_LABEL=student \
+LOGGING_DIR=/data/huangjiaqi/projects/SimplerEnv/results_compare/student \
 bash /data/huangjiaqi/projects/SimplerEnv/simpler_env/policies/sim_cogact/scripts/cogact_pick_coke_can_visual_matching.sh  \
- > /data/huangjiaqi/projects/SimplerEnv/simpler_env/log/DiT-B/simpler_pick_coke.log 2>&1 &
+ > /data/huangjiaqi/projects/SimplerEnv/simpler_env/log/depth-DiT-B/simpler_pick_coke.log 2>&1 &
 
 bash /data/huangjiaqi/projects/SimplerEnv/simpler_env/policies/sim_cogact/scripts/cogact_put_in_drawer_variant_agg.sh \
-> /data/huangjiaqi/projects/SimplerEnv/simpler_env/log/DiT-B/simpler_put_in_drawer.log 2>&1 &
+> /data/huangjiaqi/projects/SimplerEnv/simpler_env/log/depth-DiT-B/simpler_put_in_drawer.log 2>&1 &
 
 bash simpler_env/policies/sim_cogact/scripts/cogact_move_near_visual_matching.sh \
-> /data/huangjiaqi/projects/SimplerEnv/simpler_env/log/DiT-B/simpler_move_near_visual_matching.log 2>&1
+> /data/huangjiaqi/projects/SimplerEnv/simpler_env/log/depth-DiT-B/simpler_move_near_visual_matching.log 2>&1
 
 bash simpler_env/policies/sim_cogact/scripts/cogact_put_in_drawer_variant_agg.sh \
-> /data/huangjiaqi/projects/SimplerEnv/simpler_env/log/DiT-B/simpler_pick_coke_variant.log 2>&1
+> /data/huangjiaqi/projects/SimplerEnv/simpler_env/log/depth-DiT-B/simpler_pick_coke_variant.log 2>&1
 
 
 timing:
@@ -168,3 +174,16 @@ timing:
 SIMPLER_ENABLE_TIMING=1 SIMPLER_TIMING_WARMUP_CHUNKS=20 \
 bash /data/huangjiaqi/projects/SimplerEnv/simpler_env/policies/sim_cogact/scripts/cogact_pick_coke_can_visual_matching.sh \
 > /data/huangjiaqi/projects/SimplerEnv/simpler_env/log/simpler_pick_coke.log 2>&1 &
+
+
+PYTHONPATH=. CUDA_VISIBLE_DEVICES=1 \
+nohup proxy_up python scripts/export_train_compare_npz.py \
+  --data_root_dir "/home/huangjiaqi/.vscode-server/openvla_data" \
+  --pretrained_checkpoint "/data/huangjiaqi/projects/CogACT-Base" \
+  --resume_checkpoint runs/distillation/checkpoint_final_copy.pt \
+  --data_mix bridge \
+  --batch_size 1 \
+  --max_batches 2 \
+  --num_ddim_steps_teacher 20 \
+  --num_ddim_steps_student 4 \
+  >scripts/eval_distillation.log 2>&1 &
