@@ -41,10 +41,12 @@ class DistillationConfig:
     train_strategy: str = "fsdp"
     # Loss 权重
     lambda_task: float = 0.3
-    lambda_final: float = 1.0
+    lambda_final: float = 0.0  # Optional legacy Teacher-final alignment; disabled for strict role separation.
+    lambda_final_gt: float = 1.0
     lambda_traj: float = 0.2
     lambda_path: float = 0.0
     lambda_macro: float = 0.0
+    exclude_teacher_terminal: bool = True
     refinement_progress_eps: float = 1e-8
     refinement_action_dim_weights: Optional[Tuple[float, ...]] = None
     lambda_neg: float = 0.1

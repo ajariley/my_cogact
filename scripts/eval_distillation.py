@@ -207,22 +207,28 @@ def _eval_one_batch(
             f"teacher={tuple(teacher_traj.shape)}, student={tuple(student_traj.shape)}"
         )
 
-    loss_final = torch.nn.functional.mse_loss(x0_student, x0_teacher.detach())
-    loss_traj = torch.nn.functional.mse_loss(student_traj, teacher_traj.detach())
-    loss_path, loss_macro, _ = depth_path_losses(
+    loss_final_gt = torch.nn.functional.mse_loss(x0_student, actions_future)
+    loss_final_teacher = torch.nn.functional.mse_loss(x0_student, x0_teacher.detach())
+    trajectory_slice = slice(None, -1) if cfg.exclude_teacher_terminal else slice(None)
+    loss_traj_teacher = x0_student.new_zeros(()) if cfg.exclude_teacher_terminal and student_traj.shape[0] <= 1 else torch.nn.functional.mse_loss(
+        student_traj[trajectory_slice], teacher_traj[trajectory_slice].detach()
+    )
+    loss_path_teacher, loss_macro_teacher, _ = depth_path_losses(
         student_out["depth_x0_path"],
         teacher_out["depth_x0_path"],
         action_dim_weights=cfg.refinement_action_dim_weights,
         eps=cfg.refinement_progress_eps,
+        exclude_terminal=cfg.exclude_teacher_terminal,
     )
     student_gt_action_mse = torch.nn.functional.mse_loss(x0_student, actions_future)
     teacher_gt_action_mse = torch.nn.functional.mse_loss(x0_teacher, actions_future)
     return {
-        "eval/loss_final": float(loss_final.item()),
-        "eval/loss_traj": float(loss_traj.item()),
-        "eval/loss_path": float(loss_path.item()),
-        "eval/loss_macro": float(loss_macro.item()),
-        "eval/student_teacher_final_mse": float(loss_final.item()),
+        "eval/loss_final_gt": float(loss_final_gt.item()),
+        "eval/loss_final_teacher": float(loss_final_teacher.item()),
+        "eval/loss_traj_teacher": float(loss_traj_teacher.item()),
+        "eval/loss_path_teacher": float(loss_path_teacher.item()),
+        "eval/loss_macro_teacher": float(loss_macro_teacher.item()),
+        "eval/student_teacher_final_mse": float(loss_final_teacher.item()),
         "eval/student_gt_action_mse": float(student_gt_action_mse.item()),
         "eval/teacher_gt_action_mse": float(teacher_gt_action_mse.item()),
         "teacher_timesteps": teacher_out["timesteps"],
@@ -303,10 +309,11 @@ def main(cfg: DistillationConfig) -> None:
     )
     overwatch.info(f"EVAL CACHE READY | path={eval_cache_path} num_batches={len(eval_cache['items'])}")
     sums = {
-        "eval/loss_final": 0.0,
-        "eval/loss_traj": 0.0,
-        "eval/loss_path": 0.0,
-        "eval/loss_macro": 0.0,
+        "eval/loss_final_gt": 0.0,
+        "eval/loss_final_teacher": 0.0,
+        "eval/loss_traj_teacher": 0.0,
+        "eval/loss_path_teacher": 0.0,
+        "eval/loss_macro_teacher": 0.0,
         "eval/student_teacher_final_mse": 0.0,
         "eval/student_gt_action_mse": 0.0,
         "eval/teacher_gt_action_mse": 0.0,
@@ -318,6 +325,7 @@ def main(cfg: DistillationConfig) -> None:
         "eval_seed": cfg.eval_seed,
         "lambda_task": cfg.lambda_task,
         "lambda_final": cfg.lambda_final,
+        "lambda_final_gt": cfg.lambda_final_gt,
         "lambda_traj": cfg.lambda_traj,
         "lambda_path": cfg.lambda_path,
         "lambda_macro": cfg.lambda_macro,
@@ -356,10 +364,11 @@ def main(cfg: DistillationConfig) -> None:
             sums[key] += row[key]
         print(
             f"eval_step={count} "
-            f"loss_final={row['eval/loss_final']:.6f} "
-            f"loss_traj={row['eval/loss_traj']:.6f} "
-            f"loss_path={row['eval/loss_path']:.6f} "
-            f"loss_macro={row['eval/loss_macro']:.6f} "
+            f"loss_final_gt={row['eval/loss_final_gt']:.6f} "
+            f"loss_final_teacher={row['eval/loss_final_teacher']:.6f} "
+            f"loss_traj_teacher={row['eval/loss_traj_teacher']:.6f} "
+            f"loss_path_teacher={row['eval/loss_path_teacher']:.6f} "
+            f"loss_macro_teacher={row['eval/loss_macro_teacher']:.6f} "
             f"student_teacher_final_mse={row['eval/student_teacher_final_mse']:.6f} "
             f"student_gt_action_mse={row['eval/student_gt_action_mse']:.6f} "
             f"teacher_gt_action_mse={row['eval/teacher_gt_action_mse']:.6f}",
@@ -374,10 +383,11 @@ def main(cfg: DistillationConfig) -> None:
         "type": "eval_summary",
         "eval/num_batches": count,
         "checkpoint": str(cfg.resume_checkpoint),
-        "eval/mean_loss_final": sums["eval/loss_final"] / count,
-        "eval/mean_loss_traj": sums["eval/loss_traj"] / count,
-        "eval/mean_loss_path": sums["eval/loss_path"] / count,
-        "eval/mean_loss_macro": sums["eval/loss_macro"] / count,
+        "eval/mean_loss_final_gt": sums["eval/loss_final_gt"] / count,
+        "eval/mean_loss_final_teacher": sums["eval/loss_final_teacher"] / count,
+        "eval/mean_loss_traj_teacher": sums["eval/loss_traj_teacher"] / count,
+        "eval/mean_loss_path_teacher": sums["eval/loss_path_teacher"] / count,
+        "eval/mean_loss_macro_teacher": sums["eval/loss_macro_teacher"] / count,
         "eval/mean_student_teacher_final_mse": sums["eval/student_teacher_final_mse"] / count,
         "eval/mean_student_gt_action_mse": sums["eval/student_gt_action_mse"] / count,
         "eval/mean_teacher_gt_action_mse": sums["eval/teacher_gt_action_mse"] / count,
@@ -386,10 +396,11 @@ def main(cfg: DistillationConfig) -> None:
     _append_jsonl(eval_path, summary)
     print(
         f"eval_summary num_batches={count} "
-        f"mean_loss_final={summary['eval/mean_loss_final']:.6f} "
-        f"mean_loss_traj={summary['eval/mean_loss_traj']:.6f} "
-        f"mean_loss_path={summary['eval/mean_loss_path']:.6f} "
-        f"mean_loss_macro={summary['eval/mean_loss_macro']:.6f} "
+        f"mean_loss_final_gt={summary['eval/mean_loss_final_gt']:.6f} "
+        f"mean_loss_final_teacher={summary['eval/mean_loss_final_teacher']:.6f} "
+        f"mean_loss_traj_teacher={summary['eval/mean_loss_traj_teacher']:.6f} "
+        f"mean_loss_path_teacher={summary['eval/mean_loss_path_teacher']:.6f} "
+        f"mean_loss_macro_teacher={summary['eval/mean_loss_macro_teacher']:.6f} "
         f"mean_student_teacher_final_mse={summary['eval/mean_student_teacher_final_mse']:.6f} "
         f"mean_student_gt_action_mse={summary['eval/mean_student_gt_action_mse']:.6f} "
         f"mean_teacher_gt_action_mse={summary['eval/mean_teacher_gt_action_mse']:.6f}",

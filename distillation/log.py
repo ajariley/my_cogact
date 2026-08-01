@@ -222,10 +222,11 @@ def format_metric_row(
     step: int,
     loss_total: float,
     loss_task: float,
-    loss_final: float,
-    loss_traj: float,
-    loss_path: float,
-    loss_macro: float,
+    loss_final_gt: float,
+    loss_final_teacher: float,
+    loss_traj_teacher: float,
+    loss_path_teacher: float,
+    loss_macro_teacher: float,
     grad_norm: float | None,
     lr: float,
     actions_shape,
@@ -237,7 +238,7 @@ def format_metric_row(
         f"{step:<4} | "
         f"{loss_total:<7.4f} | "
         f"{loss_task:<7.4f} | "
-        f"{loss_final:<7.4f} | "
+        f"{loss_final_gt:<7.4f} | "
         f"{grad:<7} | "
         f"{lr:<8.2e} | "
         f"{str(tuple(actions_shape)):<10} | "
@@ -253,10 +254,11 @@ def format_metric_line(
     epochs: int,
     loss_total: float,
     loss_task: float,
-    loss_final: float,
-    loss_traj: float,
-    loss_path: float,
-    loss_macro: float,
+    loss_final_gt: float,
+    loss_final_teacher: float,
+    loss_traj_teacher: float,
+    loss_path_teacher: float,
+    loss_macro_teacher: float,
     grad_norm: float | None,
     lr: float,
 ) -> str:
@@ -266,10 +268,11 @@ def format_metric_line(
         f"epoch={epoch}/{epochs} "
         f"total={loss_total:.4f} "
         f"task={loss_task:.4f} "
-        f"final={loss_final:.4f} "
-        f"traj={loss_traj:.4f} "
-        f"path={loss_path:.4f} "
-        f"macro={loss_macro:.4f} "
+        f"final_gt={loss_final_gt:.4f} "
+        f"final_teacher={loss_final_teacher:.4f} "
+        f"traj_teacher={loss_traj_teacher:.4f} "
+        f"path_teacher={loss_path_teacher:.4f} "
+        f"macro_teacher={loss_macro_teacher:.4f} "
         f"grad={grad} "
         f"lr={lr:.2e}"
     )

@@ -124,6 +124,7 @@ def depth_path_losses(
     *,
     action_dim_weights: Optional[torch.Tensor] = None,
     eps: float = 1e-8,
+    exclude_terminal: bool = False,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Return state loss, macro-update loss, and compressed teacher anchors."""
     _validate_path(student_path, "student_path")
@@ -134,17 +135,34 @@ def depth_path_losses(
             f"teacher={tuple(teacher_path.shape)}, student={tuple(student_path.shape)}"
         )
 
-    teacher_anchors, _ = compress_teacher_path(
-        teacher_path,
-        student_path.shape[0],
+    if exclude_terminal:
+        num_process_nodes = max(student_path.shape[0] - 1, 0)
+        if num_process_nodes == 0 or teacher_path.shape[0] == 1:
+            zero = student_path.new_zeros(())
+            anchors = teacher_path[-1:].detach().expand(student_path.shape[0], *teacher_path.shape[1:])
+            return zero, zero, anchors
+        student_process = student_path[:-1]
+        teacher_process = teacher_path[:-1]
+    else:
+        num_process_nodes = student_path.shape[0]
+        student_process = student_path
+        teacher_process = teacher_path
+
+    teacher_process_anchors, _ = compress_teacher_path(
+        teacher_process,
+        num_process_nodes,
         action_dim_weights=action_dim_weights,
         eps=eps,
     )
-    path_loss = torch.nn.functional.mse_loss(student_path, teacher_anchors)
-    if student_path.shape[0] == 1:
+    path_loss = torch.nn.functional.mse_loss(student_process, teacher_process_anchors)
+    if student_process.shape[0] == 1:
         macro_loss = student_path.new_zeros(())
     else:
-        student_updates = student_path[1:] - student_path[:-1]
-        teacher_updates = teacher_anchors[1:] - teacher_anchors[:-1]
+        student_updates = student_process[1:] - student_process[:-1]
+        teacher_updates = teacher_process_anchors[1:] - teacher_process_anchors[:-1]
         macro_loss = torch.nn.functional.mse_loss(student_updates, teacher_updates)
+    if exclude_terminal:
+        teacher_anchors = torch.cat([teacher_process_anchors, teacher_path[-1:].detach()], dim=0)
+    else:
+        teacher_anchors = teacher_process_anchors
     return path_loss, macro_loss, teacher_anchors

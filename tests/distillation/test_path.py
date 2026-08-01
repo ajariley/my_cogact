@@ -114,6 +114,25 @@ class DepthPathLossTest(unittest.TestCase):
 
         torch.testing.assert_close(macro_loss, torch.tensor(0.0))
 
+    def test_terminal_is_excluded_before_teacher_path_compression(self):
+        student_path = scalar_path([0.0, 1.0, 9.0])
+        teacher_a = scalar_path([0.0, 0.5, 1.0, 10.0])
+        teacher_b = scalar_path([0.0, 0.5, 1.0, 1000.0])
+
+        losses_a = depth_path_losses(student_path, teacher_a, exclude_terminal=True)
+        losses_b = depth_path_losses(student_path, teacher_b, exclude_terminal=True)
+
+        torch.testing.assert_close(losses_a[0], losses_b[0])
+        torch.testing.assert_close(losses_a[1], losses_b[1])
+
+    def test_strict_single_node_path_has_finite_zero_losses(self):
+        path_loss, macro_loss, _ = depth_path_losses(
+            scalar_path([1.0]), scalar_path([2.0]), exclude_terminal=True
+        )
+
+        torch.testing.assert_close(path_loss, torch.tensor(0.0))
+        torch.testing.assert_close(macro_loss, torch.tensor(0.0))
+
 
 class FakeStudent:
     def loss(self, actions, cognition_features):
@@ -135,6 +154,7 @@ class ComputeLossIntegrationTest(unittest.TestCase):
         cfg = DistillationConfig(
             lambda_task=0.0,
             lambda_final=0.0,
+            lambda_final_gt=0.0,
             lambda_traj=0.0,
             lambda_path=2.0,
             lambda_macro=3.0,
@@ -153,7 +173,7 @@ class ComputeLossIntegrationTest(unittest.TestCase):
             student_depth_path=self.student_depth_path,
         )
 
-        expected = 2.0 * losses["path"] + 3.0 * losses["macro"]
+        expected = 2.0 * losses["path_teacher"] + 3.0 * losses["macro_teacher"]
         torch.testing.assert_close(losses["total"], expected)
         losses["total"].backward()
         self.assertIsNotNone(self.student_depth_path.grad)
@@ -172,6 +192,44 @@ class ComputeLossIntegrationTest(unittest.TestCase):
                 self.student_trajectory,
                 cfg,
             )
+
+    def test_gt_and_teacher_final_losses_are_separate(self):
+        cfg = DistillationConfig(
+            lambda_task=0.0,
+            lambda_final=0.0,
+            lambda_final_gt=1.0,
+            lambda_traj=0.0,
+        )
+        losses = compute_loss(
+            FakeStudent(), self.actions, self.z, self.x0_teacher + 5.0, self.x0_student,
+            self.teacher_trajectory, self.student_trajectory, cfg,
+        )
+
+        torch.testing.assert_close(losses["final_gt"], torch.tensor(1.0))
+        torch.testing.assert_close(losses["final_teacher"], torch.tensor(16.0))
+        torch.testing.assert_close(losses["total"], losses["final_gt"])
+
+    def test_teacher_terminal_is_excluded_from_trajectory_loss(self):
+        cfg = DistillationConfig(
+            lambda_task=0.0,
+            lambda_final=0.0,
+            lambda_final_gt=0.0,
+            lambda_traj=1.0,
+            exclude_teacher_terminal=True,
+        )
+        changed_teacher_trajectory = self.teacher_trajectory.clone()
+        changed_teacher_trajectory[-1] = 1000.0
+        common = (
+            FakeStudent(), self.actions, self.z, self.x0_teacher, self.x0_student,
+        )
+        loss_a = compute_loss(
+            *common, self.teacher_trajectory, self.student_trajectory, cfg,
+        )["traj_teacher"]
+        loss_b = compute_loss(
+            *common, changed_teacher_trajectory, self.student_trajectory, cfg,
+        )["traj_teacher"]
+
+        torch.testing.assert_close(loss_a, loss_b)
 
 if __name__ == "__main__":
     unittest.main()

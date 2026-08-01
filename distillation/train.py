@@ -404,10 +404,11 @@ def train_distillation(cfg: DistillationConfig, hf_token: Optional[str] = None) 
             optimizer.step()
             loss_total = float(loss_dict["total"].item())
             loss_task = float(loss_dict["task"].item())
-            loss_final = float(loss_dict["final"].item())
-            loss_traj = float(loss_dict["traj"].item())
-            loss_path = float(loss_dict["path"].item())
-            loss_macro = float(loss_dict["macro"].item())
+            loss_final_gt = float(loss_dict["final_gt"].item())
+            loss_final_teacher = float(loss_dict["final_teacher"].item())
+            loss_traj_teacher = float(loss_dict["traj_teacher"].item())
+            loss_path_teacher = float(loss_dict["path_teacher"].item())
+            loss_macro_teacher = float(loss_dict["macro_teacher"].item())
             cuda_memory_allocated_mb = (
                 float(torch.cuda.memory_allocated(device) / 1024**2) if torch.cuda.is_available() else 0.0
             )
@@ -419,12 +420,14 @@ def train_distillation(cfg: DistillationConfig, hf_token: Optional[str] = None) 
                 "epoch": epoch + 1,
                 "loss_total": loss_total,
                 "loss_task": loss_task,
-                "loss_final": loss_final,
-                "loss_traj": loss_traj,
-                "loss_path": loss_path,
-                "loss_macro": loss_macro,
+                "loss_final_gt": loss_final_gt,
+                "loss_final_teacher": loss_final_teacher,
+                "loss_traj_teacher": loss_traj_teacher,
+                "loss_path_teacher": loss_path_teacher,
+                "loss_macro_teacher": loss_macro_teacher,
                 "lambda_task": cfg.lambda_task,
                 "lambda_final": cfg.lambda_final,
+                "lambda_final_gt": cfg.lambda_final_gt,
                 "lambda_traj": cfg.lambda_traj,
                 "lambda_path": cfg.lambda_path,
                 "lambda_macro": cfg.lambda_macro,
@@ -456,12 +459,14 @@ def train_distillation(cfg: DistillationConfig, hf_token: Optional[str] = None) 
                         "epoch": epoch + 1,
                         "loss/total": loss_total,
                         "loss/task": loss_task,
-                        "loss/final": loss_final,
-                        "loss/traj": loss_traj,
-                        "loss/path": loss_path,
-                        "loss/macro": loss_macro,
+                        "loss/final_gt": loss_final_gt,
+                        "loss/final_teacher": loss_final_teacher,
+                        "loss/traj_teacher": loss_traj_teacher,
+                        "loss/path_teacher": loss_path_teacher,
+                        "loss/macro_teacher": loss_macro_teacher,
                         "lambda/task": cfg.lambda_task,
                         "lambda/final": cfg.lambda_final,
+                        "lambda/final_gt": cfg.lambda_final_gt,
                         "lambda/traj": cfg.lambda_traj,
                         "lambda/path": cfg.lambda_path,
                         "lambda/macro": cfg.lambda_macro,
@@ -483,10 +488,11 @@ def train_distillation(cfg: DistillationConfig, hf_token: Optional[str] = None) 
                 epochs=cfg.epochs,
                 loss_total=loss_total,
                 loss_task=loss_task,
-                loss_final=loss_final,
-                loss_traj=loss_traj,
-                loss_path=loss_path,
-                loss_macro=loss_macro,
+                loss_final_gt=loss_final_gt,
+                loss_final_teacher=loss_final_teacher,
+                loss_traj_teacher=loss_traj_teacher,
+                loss_path_teacher=loss_path_teacher,
+                loss_macro_teacher=loss_macro_teacher,
                 grad_norm=grad_norm,
                 lr=lr,
             )
@@ -531,10 +537,11 @@ def train_distillation(cfg: DistillationConfig, hf_token: Optional[str] = None) 
                     append_metrics_jsonl(metrics_path, eval_summary)
                     trackers.log(
                         {
-                            "eval/mean_loss_final": eval_summary["eval/mean_loss_final"],
-                            "eval/mean_loss_traj": eval_summary["eval/mean_loss_traj"],
-                            "eval/mean_loss_path": eval_summary["eval/mean_loss_path"],
-                            "eval/mean_loss_macro": eval_summary["eval/mean_loss_macro"],
+                            "eval/mean_loss_final_gt": eval_summary["eval/mean_loss_final_gt"],
+                            "eval/mean_loss_final_teacher": eval_summary["eval/mean_loss_final_teacher"],
+                            "eval/mean_loss_traj_teacher": eval_summary["eval/mean_loss_traj_teacher"],
+                            "eval/mean_loss_path_teacher": eval_summary["eval/mean_loss_path_teacher"],
+                            "eval/mean_loss_macro_teacher": eval_summary["eval/mean_loss_macro_teacher"],
                             "eval/mean_student_teacher_final_mse": eval_summary[
                                 "eval/mean_student_teacher_final_mse"
                             ],
